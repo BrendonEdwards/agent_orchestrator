@@ -1,16 +1,18 @@
 """Main Orchestrator - coordinates the Claude Agent Team.
 
-The orchestrator sits at the top of the architecture, managing the agent
-team with Claude as the central hub. It handles task intake, analysis,
-delegation, and synthesis.
+The orchestrator manages a team of AI agents:
+- Claude: central hub, complex reasoning, task analysis, synthesis
+- Codex: code generation and technical work
+- Gemini: multimodal tasks (imagery, sound, language)
+- Llama: dogs body, grunt work via ollama (formatting, boilerplate, etc.)
+
+Memento fights context rot by keeping ultra-concise survival notes.
+Agents communicate using a compact protocol, not English.
 """
 
 from __future__ import annotations
 
-import asyncio
-from typing import Any
-
-from src.agents.base import AgentCapability, AgentMessage, AgentResponse, BaseAgent
+from src.agents.base import AgentMessage, AgentResponse, BaseAgent
 from src.agents.claude_agent import ClaudeAgent
 from src.agents.codex_agent import CodexAgent
 from src.agents.gemini_agent import GeminiAgent
@@ -20,45 +22,45 @@ from src.routing.router import MessageRouter
 from src.rules.loader import RulesLoader
 
 
+# Simple tasks that should go to Llama instead of wasting thinking agents
+_GRUNT_KEYWORDS = [
+    "format", "convert", "list", "sort", "extract", "template",
+    "boilerplate", "rename", "reorder", "cleanup", "prettify",
+]
+
+
 class Orchestrator:
     """Top-level orchestrator for the multi-agent AI system.
 
-    Architecture (matching whiteboard):
+    Architecture:
         Orchestrator
             |
-          Claude  <-- central hub
+          Claude  <-- central hub (thinking)
          /  |  \\
-      Codex Gemini Llama
-         \\  |  /
-          (mesh)
+      Codex Gemini Llama (grunt work)
 
-    Claude analyzes tasks and delegates to specialized agents:
-    - Codex: code generation, language translation, context compression
-    - Gemini: multimodal tasks (language, imagery, sound)
-    - Llama: local/private inference, fast iteration
-
-    The Memento system records all decisions and routing for auditability.
-    Rules.md defines model strengths and weaknesses for routing.
+    Memento: concise survival notes against context rot
+    Protocol: agents talk in compact format, not English
     """
 
     def __init__(
         self,
         rules_path: str | None = None,
-        memento_dir: str | None = None,
+        memento_path: str | None = None,
         claude_model: str = "claude-sonnet-4-20250514",
         codex_model: str = "o3-mini",
         gemini_model: str = "gemini-2.0-flash",
         llama_model: str = "llama3.2",
         llama_base_url: str | None = None,
     ):
-        # Initialize the Memento audit system
-        self.memento = Memento(persist_dir=memento_dir)
+        # Memento: concise notes to fight context rot
+        self.memento = Memento(persist_path=memento_path)
 
-        # Initialize the rules loader
+        # Rules: model strengths and weaknesses
         self.rules = RulesLoader(rules_path=rules_path)
         self.rules.load()
 
-        # Initialize agents
+        # Agents
         self.claude = ClaudeAgent(model_id=claude_model)
         self.codex = CodexAgent(model_id=codex_model)
         self.gemini = GeminiAgent(model_id=gemini_model)
@@ -71,63 +73,39 @@ class Orchestrator:
             "llama": self.llama,
         }
 
-        # Initialize the message router
+        # Router: handles inter-agent comms with compact protocol
         self.router = MessageRouter(
             agents=self._agents,
             rules_loader=self.rules,
             memento=self.memento,
-            codex_agent=self.codex,
-        )
-
-        self.memento.record(
-            event_type="init",
-            source="orchestrator",
-            content="Orchestrator initialized with agents: " + ", ".join(self._agents.keys()),
         )
 
     async def run(self, task: str) -> str:
-        """Run a task through the full orchestration pipeline.
+        """Run a task through the orchestration pipeline.
 
-        Steps:
-        1. Record the incoming task
-        2. Have Claude analyze and create a routing plan
-        3. Delegate subtasks to appropriate agents
-        4. Compress inter-agent context via Codex when needed
-        5. Have Claude synthesize the final response
-        6. Record the full decision chain in Memento
+        1. Note the task goal in memento (concise!)
+        2. Check if it's grunt work (send to Llama) or thinking work
+        3. For thinking work: Claude analyzes, delegates, synthesizes
+        4. Memento records key outcomes as survival notes
         """
-        # Step 1: Record the task
-        self.memento.record(
-            event_type="task_received",
-            source="user",
-            target="orchestrator",
-            content=task,
-        )
+        # Memento: remember what we're doing
+        self.memento.note("goal", task[:150], priority=3)
 
-        # Step 2: Claude analyzes the task
-        self.memento.record(
-            event_type="analysis",
-            source="orchestrator",
-            target="claude",
-            content="Requesting task analysis",
-        )
+        # Is this grunt work? Send to Llama directly
+        if self._is_grunt_work(task):
+            self.memento.note("route", "llama:grunt", priority=1)
+            response = await self.router.delegate_grunt_work(task)
+            if response.success:
+                self.memento.note("result", response.content[:150], priority=2)
+                return response.content
+            # Llama failed, fall through to thinking agents
 
-        analysis = await self.claude.analyze_task(task)
+        # Thinking work: figure out who should handle it
+        primary = self.rules.get_best_agent_for(task) or "claude"
+        self.memento.note("route", f"{primary}:primary", priority=1)
 
-        self.memento.record(
-            event_type="analysis",
-            source="claude",
-            target="orchestrator",
-            content=f"Analysis complete: {analysis.get('raw_analysis', '')[:200]}",
-        )
-
-        # Step 3: Determine which agents to involve based on rules + analysis
-        primary = self.rules.get_best_agent_for(task)
-        if primary is None:
-            primary = "claude"
-
+        # Determine supporting agents
         agents_to_use = [primary]
-        # Add supporting agents based on task characteristics
         task_lower = task.lower()
         if any(kw in task_lower for kw in ["code", "program", "function", "implement", "debug"]):
             if "codex" not in agents_to_use:
@@ -135,60 +113,30 @@ class Orchestrator:
         if any(kw in task_lower for kw in ["image", "picture", "photo", "audio", "sound", "video"]):
             if "gemini" not in agents_to_use:
                 agents_to_use.append("gemini")
-        if any(kw in task_lower for kw in ["private", "local", "offline", "sensitive"]):
-            if "llama" not in agents_to_use:
-                agents_to_use.append("llama")
 
-        self.memento.record(
-            event_type="delegation",
-            source="orchestrator",
-            content=f"Delegating to agents: {', '.join(agents_to_use)}",
-            metadata={"primary": primary, "agents": agents_to_use},
-        )
-
-        # Step 4: Send task to selected agents
-        responses: list[AgentResponse] = []
+        # Single agent path
         if len(agents_to_use) == 1:
-            msg = AgentMessage(source="orchestrator", target=agents_to_use[0], content=task)
-            resp = await self.router.route(msg)
-            responses.append(resp)
-        else:
-            msg = AgentMessage(source="orchestrator", target="broadcast", content=task)
-            results = await self.router.broadcast(msg, targets=agents_to_use)
-            responses.extend(results.values())
+            msg = AgentMessage(source="orchestrator", target=primary, content=task)
+            response = await self.router.route(msg)
+            if response.success:
+                self.memento.note("result", response.content[:150], priority=2)
+            return response.content if response.success else f"Failed: {response.error}"
 
-        # Step 5: Synthesize if multiple agents responded
-        successful = [r for r in responses if r.success]
+        # Multi-agent path: parallel execution then synthesis
+        msg = AgentMessage(source="orchestrator", target="broadcast", content=task)
+        results = await self.router.broadcast(msg, targets=agents_to_use)
+        successful = [r for r in results.values() if r.success]
 
-        if len(successful) == 0:
-            self.memento.record(
-                event_type="error",
-                source="orchestrator",
-                content="All agents failed",
-                metadata={"errors": [r.error for r in responses]},
-            )
-            return "All agents failed to process the task. Check agent health and API keys."
+        if not successful:
+            return "All agents failed. Check health and API keys."
 
         if len(successful) == 1:
             final = successful[0].content
         else:
-            self.memento.record(
-                event_type="synthesis",
-                source="orchestrator",
-                target="claude",
-                content=f"Synthesizing {len(successful)} agent responses",
-            )
             synthesis = await self.claude.synthesize(successful)
             final = synthesis.content
 
-        # Step 6: Record completion
-        self.memento.record(
-            event_type="complete",
-            source="orchestrator",
-            content=f"Task complete. Response length: {len(final)} chars",
-            metadata={"agents_used": agents_to_use},
-        )
-
+        self.memento.note("result", final[:150], priority=2)
         return final
 
     async def send_to(self, agent_name: str, content: str) -> AgentResponse:
@@ -196,21 +144,19 @@ class Orchestrator:
         msg = AgentMessage(source="user", target=agent_name, content=content)
         return await self.router.route(msg)
 
+    async def grunt(self, task: str) -> str:
+        """Send grunt work directly to Llama."""
+        return await self.llama.do_grunt_work(task)
+
     async def health_check(self) -> dict[str, bool]:
         """Check the health of all agents."""
-        results = await self.router.health_check_all()
-        self.memento.record(
-            event_type="health_check",
-            source="orchestrator",
-            content=f"Health check results: {results}",
-        )
-        return results
+        return await self.router.health_check_all()
 
-    def get_audit_trail(self, last_n: int | None = None) -> str:
-        """Get the Memento audit trail as a human-readable string."""
-        return self.memento.get_trail_summary(last_n or 50)
+    def notes(self) -> str:
+        """Get the current memento briefing (survival notes)."""
+        return self.memento.briefing()
 
-    def save_memento(self, filename: str | None = None) -> str | None:
-        """Persist the Memento trail to disk."""
-        path = self.memento.save(filename)
-        return str(path) if path else None
+    def _is_grunt_work(self, task: str) -> bool:
+        """Determine if a task is simple enough for Llama."""
+        task_lower = task.lower()
+        return any(kw in task_lower for kw in _GRUNT_KEYWORDS)

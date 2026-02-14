@@ -1,26 +1,30 @@
 """Message router for inter-agent communication.
 
-Handles routing messages between agents based on the orchestrator's
-topology: Claude as the hub with bidirectional connections to Codex,
-Gemini, and Llama Local (and between those agents as well).
+Routes messages between agents using a compact protocol format
+instead of English. Agents talk to each other in terse notation
+to minimize token waste. The Memento system provides survival
+notes to fight context rot on long-running tasks.
 """
 
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
 from src.agents.base import AgentCapability, AgentMessage, AgentResponse, BaseAgent
 from src.memento.memento import Memento
+from src.routing import protocol
 from src.rules.loader import RulesLoader
 
 
 class MessageRouter:
-    """Routes messages between agents in the orchestration network.
+    """Routes messages between agents using compact protocol format.
 
-    Supports the full mesh topology shown on the whiteboard where every
-    agent can communicate with every other agent, with Claude as the
-    preferred hub for coordination.
+    Key behaviors:
+    - Inter-agent messages are encoded in compact protocol format
+      (not English) to minimize token usage
+    - Memento briefings are injected into messages to fight context rot
+    - Llama gets simple tasks routed to it as grunt work
+    - Claude, Codex, Gemini get the complex work
     """
 
     def __init__(
@@ -28,12 +32,10 @@ class MessageRouter:
         agents: dict[str, BaseAgent],
         rules_loader: RulesLoader,
         memento: Memento,
-        codex_agent: BaseAgent | None = None,
     ):
         self._agents = agents
         self._rules = rules_loader
         self._memento = memento
-        self._codex = codex_agent  # Used for context compression
 
     async def route(self, message: AgentMessage) -> AgentResponse:
         """Route a message to its target agent."""
@@ -46,51 +48,63 @@ class MessageRouter:
                 error=f"Unknown agent: {message.target}",
             )
 
-        self._memento.record(
-            event_type="routing",
-            source=message.source,
-            target=message.target,
-            content=f"Routing message: {message.content[:100]}...",
-            metadata={"message_id": message.id},
-        )
-
-        # Apply context compression if routing between non-Claude agents
-        content = message.content
-        if (
-            self._codex
-            and message.source not in ("orchestrator", "claude")
-            and message.target != "codex"
-            and len(content) > 500
-        ):
-            from src.agents.codex_agent import CodexAgent
-
-            if isinstance(self._codex, CodexAgent):
-                content = await self._codex.translate_for_context(content)
-                message = AgentMessage(
-                    source=message.source,
-                    target=message.target,
-                    content=content,
-                    metadata={**message.metadata, "compressed": True},
-                    parent_message_id=message.id,
-                )
-                self._memento.record(
-                    event_type="context_compression",
-                    source="codex",
-                    target=message.target,
-                    content=f"Compressed message from {len(message.content)} chars",
-                )
+        # Inject memento briefing into the message metadata so the
+        # agent has survival notes even if earlier context is lost
+        briefing = self._memento.briefing()
+        if briefing:
+            message = AgentMessage(
+                source=message.source,
+                target=message.target,
+                content=message.content,
+                metadata={**message.metadata, "memento": briefing},
+                parent_message_id=message.parent_message_id,
+            )
 
         response = await target.send(message)
 
-        self._memento.record(
-            event_type="response",
-            source=message.target,
-            target=message.source,
-            content=f"Response (success={response.success}): {response.content[:100]}",
-            metadata={"token_usage": response.token_usage},
-        )
+        # Record key outcomes as memento notes
+        if response.success and response.content:
+            self._memento.note(
+                f"r:{message.target}",
+                response.content[:150],
+                priority=1,
+            )
 
         return response
+
+    async def route_compact(
+        self,
+        source: str,
+        target: str,
+        task_type: str,
+        description: str,
+        **kwargs: str,
+    ) -> AgentResponse:
+        """Route using compact protocol format instead of English.
+
+        This is the preferred way for agents to talk to each other.
+        The message is encoded as terse key-value pairs, not prose.
+        """
+        # Build compact message
+        compact = protocol.task_message(
+            task_type=task_type,
+            description=description,
+            context=self._memento.briefing(),
+            **kwargs,
+        )
+
+        msg = AgentMessage(
+            source=source,
+            target=target,
+            content=compact,
+            metadata={"protocol": "compact"},
+        )
+        return await self.route(msg)
+
+    async def delegate_grunt_work(self, task: str) -> AgentResponse:
+        """Send simple work to Llama. No thinking required."""
+        msg = AgentMessage(source="orchestrator", target="llama", content=task)
+        return await self.route(msg)
 
     async def broadcast(
         self, message: AgentMessage, targets: list[str] | None = None
@@ -98,13 +112,6 @@ class MessageRouter:
         """Send a message to multiple agents in parallel."""
         if targets is None:
             targets = list(self._agents.keys())
-
-        self._memento.record(
-            event_type="broadcast",
-            source=message.source,
-            content=f"Broadcasting to: {', '.join(targets)}",
-            metadata={"targets": targets},
-        )
 
         tasks = {}
         for target_name in targets:
@@ -139,32 +146,32 @@ class MessageRouter:
         """Route a message to the best agent for a given capability."""
         best_agent = self._rules.get_best_agent_for(capability.value)
         if best_agent and best_agent in self._agents:
-            message_copy = AgentMessage(
+            msg = AgentMessage(
                 source=message.source,
                 target=best_agent,
                 content=message.content,
                 metadata=message.metadata,
                 parent_message_id=message.id,
             )
-            return await self.route(message_copy)
+            return await self.route(msg)
 
         # Fallback: find any agent with the capability
         for name, agent in self._agents.items():
             if agent.supports(capability):
-                message_copy = AgentMessage(
+                msg = AgentMessage(
                     source=message.source,
                     target=name,
                     content=message.content,
                     metadata=message.metadata,
                     parent_message_id=message.id,
                 )
-                return await self.route(message_copy)
+                return await self.route(msg)
 
         return AgentResponse(
             agent_name="router",
             content="",
             success=False,
-            error=f"No agent found with capability: {capability.value}",
+            error=f"No agent with capability: {capability.value}",
         )
 
     async def health_check_all(self) -> dict[str, bool]:

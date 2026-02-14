@@ -5,41 +5,45 @@ Multi-model AI agent orchestration system with Claude as the central hub.
 ## Architecture
 
 ```
-         ┌─────────────┐     ┌─────────────────────────────────┐
-         │ Orchestrator │────▶│ Rules.md: Model strengths +     │
-         └──────┬───────┘     │           weaknesses            │
-                │              └─────────────────────────────────┘
-                ▼
-           ┌─────────┐
-           │  Claude  │  ◀── Central hub / coordinator
-           └────┬────┘
+         ┌─────────────┐     ┌──────────────────────────────┐
+         │ Orchestrator │────▶│ Rules.md: strengths/weaknesses│
+         └──────┬───────┘     └──────────────────────────────┘
+                │
+          ┌─────▼─────┐
+          │   Claude   │  ◀── The brain (thinking, synthesis)
+          └─────┬──────┘
           ╱     │     ╲
-    ┌────▼─┐ ┌─▼───┐ ┌▼─────┐
-    │ Codex│ │Gemini│ │Llama │
-    └──┬───┘ └──┬──┘ └──┬───┘
-       └────────┼────────┘
-            (mesh)
+    ┌────▼─┐ ┌─▼────┐ ┌▼─────┐
+    │ Codex│ │Gemini │ │Llama │ ◀── The dogs body (grunt work)
+    └──────┘ └──────┘ └──────┘
 
-    Memento: audit trail of all decisions
+    Memento: concise survival notes (fights context rot)
+    Protocol: agents talk in compact format, not English
+```
+
+## Core Ideas
+
+**Memento** - Like the film. LLMs suffer from "context rot" - as the context window fills, reasoning degrades. Memento keeps ultra-concise survival notes (not a verbose log) so agents can keep functioning with minimal memory. When note space fills up, low-priority notes are dropped, like choosing which tattoo matters most.
+
+**Llama as dogs body** - Ollama handles the grunt work that doesn't need thinking: formatting, boilerplate, cleanup, data conversion. Thinking agents (Claude, Codex, Gemini) don't waste context on menial tasks.
+
+**Compact protocol** - Agents don't need English to talk to each other. Code is in English for humans, but inter-agent messages use a terse key-value format that cuts token usage by ~60%:
+
+```
+English:  "Please write a Python function called sum_evens that takes
+           a list of integers and returns the sum of even numbers"
+
+Protocol: T:codegen|L:py|N:sum_evens|I:list[int]|O:int|D:sum even vals
 ```
 
 ## Agents
 
-| Agent | Provider | Specialization |
-|-------|----------|----------------|
-| **Claude** | Anthropic | Central hub - reasoning, synthesis, coordination |
-| **Codex** | OpenAI | Code generation, language translation, context compression |
-| **Gemini** | Google | Multimodal - language, imagery, sound |
-| **Llama** | Local | Private inference, fast iteration, offline operation |
-
-## Key Concepts
-
-- **Orchestrator**: Top-level coordinator that manages the agent team
-- **Claude as Hub**: Claude analyzes tasks, delegates to specialists, and synthesizes results
-- **Context Compression**: Codex translates verbose outputs into compact representations before routing between agents (conserves context windows)
-- **Rules.md**: Configurable model strengths/weaknesses that inform routing decisions
-- **Memento**: Audit trail answering "how did we write the notes?" - records every decision, delegation, and result
-- **Message Router**: Handles inter-agent communication with full mesh support
+| Agent | Role | When to use |
+|-------|------|-------------|
+| **Claude** | Brain | Complex reasoning, synthesis, coordination |
+| **Codex** | Coder | Code generation, technical translation |
+| **Gemini** | Eyes/Ears | Images, audio, sound, multimodal |
+| **Llama** | Dogs body | Formatting, boilerplate, simple grunt work |
 
 ## Setup
 
@@ -50,10 +54,10 @@ pip install -e .
 ### Environment Variables
 
 ```bash
-export ANTHROPIC_API_KEY="your-anthropic-key"     # For Claude
-export OPENAI_API_KEY="your-openai-key"           # For Codex
-export GOOGLE_API_KEY="your-google-key"            # For Gemini
-export LLAMA_BASE_URL="http://localhost:11434/v1"  # For Llama (ollama default)
+export ANTHROPIC_API_KEY="your-key"                # Claude
+export OPENAI_API_KEY="your-key"                   # Codex
+export GOOGLE_API_KEY="your-key"                   # Gemini
+export LLAMA_BASE_URL="http://localhost:11434/v1"   # Llama (ollama)
 ```
 
 ## Usage
@@ -63,25 +67,26 @@ import asyncio
 from src import Orchestrator
 
 async def main():
-    orch = Orchestrator(rules_path="rules.md", memento_dir="memento_logs")
+    orch = Orchestrator(rules_path="rules.md")
 
-    # Run a task through the full pipeline
-    result = await orch.run("Write a Python function to parse CSV files")
+    # Complex task -> Claude analyzes, delegates, synthesizes
+    result = await orch.run("Design a REST API for user management")
     print(result)
 
-    # Send directly to a specific agent
-    response = await orch.send_to("gemini", "Describe this image")
-    print(response.content)
+    # Grunt work -> goes straight to Llama
+    result = await orch.run("Format this JSON: {a:1,b:2}")
+    print(result)
 
-    # Check agent health
+    # Direct grunt work
+    cleaned = await orch.grunt("Sort these alphabetically: zebra, apple, mango")
+    print(cleaned)
+
+    # Check survival notes (memento)
+    print(orch.notes())
+
+    # Check what's alive
     health = await orch.health_check()
     print(health)
-
-    # View the audit trail
-    print(orch.get_audit_trail())
-
-    # Save the memento log
-    orch.save_memento()
 
 asyncio.run(main())
 ```
@@ -89,24 +94,21 @@ asyncio.run(main())
 ## Project Structure
 
 ```
-agent_orchestrator/
-├── src/
-│   ├── orchestrator.py          # Main orchestrator
-│   ├── agents/
-│   │   ├── base.py              # Base agent interface
-│   │   ├── claude_agent.py      # Claude (central hub)
-│   │   ├── codex_agent.py       # Codex (code + translation)
-│   │   ├── gemini_agent.py      # Gemini (multimodal)
-│   │   └── llama_agent.py       # Llama (local inference)
-│   ├── memento/
-│   │   └── memento.py           # Audit trail system
-│   ├── routing/
-│   │   └── router.py            # Inter-agent message routing
-│   └── rules/
-│       └── loader.py            # Rules.md parser
-├── rules.md                     # Model strengths & weaknesses
-├── pyproject.toml
-└── requirements.txt
+src/
+├── orchestrator.py          # Main orchestrator
+├── agents/
+│   ├── base.py              # Base agent interface
+│   ├── claude_agent.py      # Claude (brain)
+│   ├── codex_agent.py       # Codex (code)
+│   ├── gemini_agent.py      # Gemini (multimodal)
+│   └── llama_agent.py       # Llama (grunt work)
+├── memento/
+│   └── memento.py           # Anti-context-rot survival notes
+├── routing/
+│   ├── router.py            # Inter-agent message routing
+│   └── protocol.py          # Compact wire format (not English)
+└── rules/
+    └── loader.py            # Rules.md parser
 ```
 
 ## License
