@@ -2,7 +2,8 @@
 
 Uses your existing Gemini Advanced subscription. No API keys needed.
 Install: npm install -g @anthropic-ai/claude-code  (or Google's gemini CLI)
-Each call spawns: gemini -p "prompt"
+Short prompts: gemini -p "prompt"
+Long prompts: piped via stdin
 """
 
 from __future__ import annotations
@@ -12,12 +13,15 @@ import shutil
 
 from src.agents.base import AgentCapability, AgentMessage, AgentResponse, BaseAgent
 
+_STDIN_THRESHOLD = 32_000
+
 
 class GeminiAgent(BaseAgent):
     """Gemini via the Gemini CLI.
 
     Spawns `gemini` as a subprocess. Uses your existing subscription.
-    Install with: npm install -g @anthropic-ai/claude-code  (TODO: real gemini CLI)
+    Install with: npm install -g @google/gemini-cli
+    Prompts over 32KB are piped via stdin.
     """
 
     def __init__(self, model_id: str = "gemini-2.0-flash", cli_path: str | None = None):
@@ -41,12 +45,25 @@ class GeminiAgent(BaseAgent):
             prompt = f"[Survival notes: {message.memento}]\n\n{prompt}"
 
         try:
-            proc = await asyncio.create_subprocess_exec(
-                self._cli, "-p", prompt,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+            if len(prompt) > _STDIN_THRESHOLD:
+                proc = await asyncio.create_subprocess_exec(
+                    self._cli, "-p", "-",
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(input=prompt.encode()), timeout=300,
+                )
+            else:
+                proc = await asyncio.create_subprocess_exec(
+                    self._cli, "-p", prompt,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=300,
+                )
 
             if proc.returncode != 0:
                 return AgentResponse(

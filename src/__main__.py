@@ -53,8 +53,13 @@ def main() -> None:
     parser.add_argument(
         "--max-depth",
         type=int,
-        default=10,
-        help="Max fractal depth (default: 10, stops naturally when tasks are simple)",
+        default=3,
+        help="Max fractal depth (default: 3, each level adds ~20-30s latency)",
+    )
+    parser.add_argument(
+        "--shallow", "-s",
+        action="store_true",
+        help="Shallow mode: decompose once, no recursion (depth=1, fastest)",
     )
     parser.add_argument(
         "--team",
@@ -86,9 +91,10 @@ def main() -> None:
         parser.print_help()
         sys.exit(1)
 
+    depth = 1 if args.shallow else args.max_depth
     orch = Orchestrator(
         rules_path=args.rules,
-        max_depth=args.max_depth,
+        max_depth=depth,
         qa_enabled=not args.no_qa,
         max_qa_retries=args.qa_retries,
         qa_pass_score=args.qa_threshold,

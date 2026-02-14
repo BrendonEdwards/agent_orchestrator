@@ -1,7 +1,8 @@
 """Claude agent - the brain. Runs via Claude Code CLI.
 
 Uses your existing Claude Pro subscription. No API keys needed.
-Each call spawns: claude -p "prompt" --output-format text
+Short prompts: claude -p "prompt" --output-format text
+Long prompts: echo "prompt" | claude -p - --output-format text
 """
 
 from __future__ import annotations
@@ -11,12 +12,17 @@ import shutil
 
 from src.agents.base import AgentCapability, AgentMessage, AgentResponse, BaseAgent
 
+# OS arg limit varies (128KB-2MB). Stay safe with a 32KB threshold.
+_STDIN_THRESHOLD = 32_000
+
 
 class ClaudeAgent(BaseAgent):
     """Claude via the Claude Code CLI.
 
     Spawns `claude -p "prompt"` as a subprocess. Uses your Pro
     subscription - no API key, no per-token billing.
+
+    Prompts over 32KB are piped via stdin to avoid OS arg length limits.
     """
 
     def __init__(self, model_id: str = "claude-sonnet-4-20250514", cli_path: str | None = None):
@@ -41,13 +47,29 @@ class ClaudeAgent(BaseAgent):
             prompt = f"[Survival notes: {message.memento}]\n\n{prompt}"
 
         try:
-            proc = await asyncio.create_subprocess_exec(
-                self._cli, "-p", prompt,
-                "--output-format", "text",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+            if len(prompt) > _STDIN_THRESHOLD:
+                # Long prompt: pipe via stdin to avoid OS arg length limits
+                proc = await asyncio.create_subprocess_exec(
+                    self._cli, "-p", "-",
+                    "--output-format", "text",
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(input=prompt.encode()), timeout=300,
+                )
+            else:
+                # Short prompt: pass as arg
+                proc = await asyncio.create_subprocess_exec(
+                    self._cli, "-p", prompt,
+                    "--output-format", "text",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=300,
+                )
 
             if proc.returncode != 0:
                 return AgentResponse(

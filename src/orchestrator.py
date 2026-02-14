@@ -10,6 +10,10 @@ Agents run via CLI subprocesses - uses your existing Pro subscriptions:
 - Codex: `codex -q "prompt"` (ChatGPT Plus subscription)
 - Gemini: `gemini -p "prompt"` (Gemini Advanced subscription)
 - Llama: Groq API (free tier, the one exception)
+
+Max depth capped at 3 by default. Each depth level adds ~20-30s of
+latency from CLI subprocess overhead, so 3 levels keeps wall-clock
+time reasonable while still allowing meaningful decomposition.
 """
 
 from __future__ import annotations
@@ -122,7 +126,7 @@ class Orchestrator:
         gemini_cli: str | None = None,
         llama_provider: str = "groq",
         depth: int = 0,
-        max_depth: int = 10,
+        max_depth: int = 3,
         agents: dict[str, BaseAgent] | None = None,
         qa_enabled: bool = True,
         max_qa_retries: int = _MAX_QA_RETRIES,
