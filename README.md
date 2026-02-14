@@ -61,35 +61,39 @@ Same pattern at every scale: **decompose, checklist, delegate, QA, synthesize**.
 
 **Stateless + Memento** - Every agent call is a fresh spawn. No conversation history, no context rot. The only memory is ~20 ultra-concise survival notes. Parent notes flow down to sub-swarms.
 
-**Llama as dogs body** - Grunt work goes straight to Llama, no QA needed.
+**Llama as dogs body** - Grunt work goes straight to Llama via Groq, no QA needed.
 
 ## Where compute runs
 
-**Nothing runs on your machine** (unless you want it to).
+**Nothing runs on your machine.** All inference happens on provider servers.
 
-| Agent | Provider | Compute location |
-|-------|----------|-----------------|
-| Claude | Anthropic API | Anthropic's servers |
-| Codex | OpenAI API | OpenAI's servers |
-| Gemini | Google AI API | Google's servers |
-| Llama | Configurable | See below |
+| Agent | Provider | Compute | Cost |
+|-------|----------|---------|------|
+| Claude | Anthropic API | Anthropic's servers | Pay-per-token |
+| Codex | OpenAI API | OpenAI's servers | Pay-per-token |
+| Gemini | Google AI Studio | Google's servers | Free tier available |
+| Llama | Groq (default) | Groq's servers | Free tier available |
 
-Llama is the only one that *can* run locally (via Ollama), but doesn't have to:
+### API keys vs Pro subscriptions
 
-```bash
-# Local (default) - runs on your machine
-export LLAMA_BASE_URL="http://localhost:11434/v1"
+**Pro/Plus subscriptions DO NOT give API access.** They are completely separate products:
 
-# Groq cloud - runs on Groq's servers, very fast
-export LLAMA_BASE_URL="https://api.groq.com/openai/v1"
-export GROQ_API_KEY="your-key"
+| Subscription | What you get | API access? |
+|-------------|-------------|-------------|
+| Claude Pro ($20/mo) | claude.ai web chat | No |
+| ChatGPT Plus ($20/mo) | chatgpt.com web chat | No |
+| Gemini Advanced ($20/mo) | gemini.google.com web chat | No |
 
-# Together AI cloud - runs on Together's servers
-export LLAMA_BASE_URL="https://api.together.xyz/v1"
-export TOGETHER_API_KEY="your-key"
-```
+You need **API keys** (separate billing, pay-per-token). The cheapest path:
 
-Point `LLAMA_BASE_URL` at any OpenAI-compatible endpoint and all compute is remote.
+| Provider | How to get started |
+|----------|--------------------|
+| Anthropic | console.anthropic.com - add credits, get API key |
+| OpenAI | platform.openai.com - add credits, get API key |
+| Google AI | aistudio.google.com - free API key, generous free tier |
+| Groq | console.groq.com - free API key, generous free tier |
+
+**Gemini and Groq both have free tiers**, so 2 of 4 agents cost nothing to start.
 
 ## CLI
 
@@ -100,7 +104,7 @@ python -m src "build a REST API for user management"
 # Direct to a specific agent (bypasses decomposition)
 python -m src "write a binary search" --agent codex
 
-# Grunt work (straight to Llama, no QA)
+# Grunt work (straight to Llama on Groq, no QA)
 python -m src "format this JSON: {a:1,b:2}" --grunt
 
 # Disable QA for speed
@@ -121,46 +125,26 @@ python -m src --notes
 
 ### How to invoke from Claude Code CLI
 
-You're already in a Claude Code session. Here's exactly how to run it:
-
 ```bash
-# 1. Make sure you're in the project directory
+# 1. Install
 cd /path/to/agent_orchestrator
-
-# 2. Install dependencies
 pip install -e .
 
-# 3. Set your API keys
-export ANTHROPIC_API_KEY="sk-ant-..."
-export OPENAI_API_KEY="sk-..."
-export GOOGLE_API_KEY="AI..."
+# 2. Set API keys (Gemini and Groq have free tiers)
+export ANTHROPIC_API_KEY="sk-ant-..."    # console.anthropic.com
+export OPENAI_API_KEY="sk-..."           # platform.openai.com
+export GOOGLE_API_KEY="AI..."            # aistudio.google.com (free)
+export GROQ_API_KEY="gsk_..."            # console.groq.com (free)
 
-# 4. Optional: point Llama at a cloud provider so nothing runs locally
-export LLAMA_BASE_URL="https://api.groq.com/openai/v1"
-export GROQ_API_KEY="gsk_..."
-
-# 5. Run it - just say what you need
+# 3. Run it
 python -m src "build a REST API with auth and tests"
-
-# 6. Or from Python directly
-python -c "
-import asyncio
-from src import Orchestrator
-
-async def main():
-    orch = Orchestrator()
-    result = await orch.run('build a REST API with auth and tests')
-    print(result)
-
-asyncio.run(main())
-"
 ```
 
 That's it. The orchestrator will:
 1. Ask Claude to decompose the task
 2. Generate checklists for each subtask
 3. Spawn fractal sub-swarms with weighted teams
-4. Agents do the work (on provider servers)
+4. Agents do the work (on provider servers, not yours)
 5. Different models QA each other's work
 6. Failed work gets sent back with feedback
 7. Results synthesized and returned
@@ -183,7 +167,7 @@ async def main():
     result = await orch.run("Build a web app with image upload")
     print(result)
 
-    # Grunt work -> straight to Llama, no QA
+    # Grunt work -> straight to Llama on Groq, no QA
     await orch.grunt("sort alphabetically: zebra, apple, mango")
 
     # Manual fractal spawn with custom team
@@ -216,14 +200,13 @@ pip install -e .
 ```
 
 ```bash
-export ANTHROPIC_API_KEY="your-key"                # Claude (Anthropic servers)
-export OPENAI_API_KEY="your-key"                   # Codex (OpenAI servers)
-export GOOGLE_API_KEY="your-key"                   # Gemini (Google servers)
+# Required (pay-per-token)
+export ANTHROPIC_API_KEY="your-key"     # Claude
+export OPENAI_API_KEY="your-key"        # Codex
 
-# Pick ONE for Llama:
-export LLAMA_BASE_URL="http://localhost:11434/v1"   # Ollama (local)
-export LLAMA_BASE_URL="https://api.groq.com/openai/v1"  # Groq (cloud)
-export GROQ_API_KEY="your-key"
+# Free tiers available
+export GOOGLE_API_KEY="your-key"        # Gemini (aistudio.google.com)
+export GROQ_API_KEY="your-key"          # Llama (console.groq.com)
 ```
 
 ## Project Structure
@@ -234,10 +217,10 @@ src/
 ├── orchestrator.py         # Fractal orchestrator + QA loop
 ├── agents/
 │   ├── base.py             # Stateless agent interface
-│   ├── claude_agent.py     # Claude (brain, on Anthropic servers)
-│   ├── codex_agent.py      # Codex (code, on OpenAI servers)
-│   ├── gemini_agent.py     # Gemini (multimodal, on Google servers)
-│   └── llama_agent.py      # Llama (grunt, local or cloud)
+│   ├── claude_agent.py     # Claude (Anthropic servers)
+│   ├── codex_agent.py      # Codex (OpenAI servers)
+│   ├── gemini_agent.py     # Gemini (Google servers)
+│   └── llama_agent.py      # Llama (Groq servers)
 ├── memento/
 │   └── memento.py          # Anti-context-rot survival notes
 ├── routing/

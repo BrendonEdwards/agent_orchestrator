@@ -1,16 +1,11 @@
-"""Llama agent - the dogs body. Grunt work.
+"""Llama agent - the dogs body. Grunt work via cloud inference.
 
 Stateless (obviously - it's doing grunt work, not thinking).
 No memento notes needed for simple tasks.
 
-Runs on:
-- Ollama locally: LLAMA_BASE_URL=http://localhost:11434/v1 (default)
-- Groq cloud:     LLAMA_BASE_URL=https://api.groq.com/openai/v1
-                  GROQ_API_KEY=your-key
-- Together cloud: LLAMA_BASE_URL=https://api.together.xyz/v1
-                  TOGETHER_API_KEY=your-key
-
-Set the base URL to a cloud provider and you never run anything locally.
+Runs on cloud providers (no local compute):
+- Groq (default): GROQ_API_KEY=your-key   (free tier available, very fast)
+- Together AI:    TOGETHER_API_KEY=your-key
 """
 
 from __future__ import annotations
@@ -21,27 +16,31 @@ from typing import Any
 
 from src.agents.base import AgentCapability, AgentMessage, AgentResponse, BaseAgent
 
-# Known cloud providers that need API keys
-_CLOUD_PROVIDERS = {
-    "groq.com": "GROQ_API_KEY",
-    "together.xyz": "TOGETHER_API_KEY",
+# Cloud providers: domain -> (env var for key, base URL)
+_PROVIDERS = {
+    "groq": {
+        "base_url": "https://api.groq.com/openai/v1",
+        "key_env": "GROQ_API_KEY",
+    },
+    "together": {
+        "base_url": "https://api.together.xyz/v1",
+        "key_env": "TOGETHER_API_KEY",
+    },
 }
 
 
 class LlamaAgent(BaseAgent):
-    """Llama: grunt work. Formatting, boilerplate, simple tasks.
+    """Llama: grunt work via cloud inference. No local compute.
 
-    Stateless. Runs via any OpenAI-compatible endpoint:
-    - Ollama (local, default)
-    - Groq (cloud, fast)
-    - Together AI (cloud)
-    - Any OpenAI-compatible server
+    Stateless. Runs via Groq (default) or Together AI.
+    Both have free tiers. Both are fast.
     """
 
     def __init__(
         self,
-        model_id: str = "llama3.2",
+        model_id: str = "llama-3.2-3b-preview",
         base_url: str | None = None,
+        provider: str = "groq",
     ):
         super().__init__(
             name="llama",
@@ -49,23 +48,26 @@ class LlamaAgent(BaseAgent):
             capabilities=[
                 AgentCapability.TEXT_GENERATION,
                 AgentCapability.SUMMARIZATION,
-                AgentCapability.LOCAL_EXECUTION,
             ],
         )
-        self._base_url = base_url or os.environ.get(
-            "LLAMA_BASE_URL", "http://localhost:11434/v1"
-        )
+        # Resolve provider config
+        if base_url:
+            self._base_url = base_url
+            self._api_key = self._detect_key(base_url)
+        else:
+            prov = _PROVIDERS.get(provider, _PROVIDERS["groq"])
+            self._base_url = prov["base_url"]
+            self._api_key = os.environ.get(prov["key_env"], "")
+
         self._client: Any = None
 
-    def _resolve_api_key(self) -> str:
-        """Resolve API key based on the base URL.
-
-        Local Ollama doesn't need one. Cloud providers do.
-        """
-        for domain, env_var in _CLOUD_PROVIDERS.items():
-            if domain in self._base_url:
-                return os.environ.get(env_var, "")
-        return "not-needed"
+    def _detect_key(self, url: str) -> str:
+        """Detect the right API key based on URL."""
+        if "groq.com" in url:
+            return os.environ.get("GROQ_API_KEY", "")
+        if "together.xyz" in url:
+            return os.environ.get("TOGETHER_API_KEY", "")
+        return os.environ.get("LLAMA_API_KEY", "")
 
     def _get_client(self) -> Any:
         if self._client is None:
@@ -73,12 +75,12 @@ class LlamaAgent(BaseAgent):
 
             self._client = openai.AsyncOpenAI(
                 base_url=self._base_url,
-                api_key=self._resolve_api_key(),
+                api_key=self._api_key,
             )
         return self._client
 
     async def send(self, message: AgentMessage) -> AgentResponse:
-        """Fresh call to ollama. No history, no context needed."""
+        """Fresh call to cloud Llama. No history, no context needed."""
         try:
             client = self._get_client()
 
@@ -101,7 +103,7 @@ class LlamaAgent(BaseAgent):
                     "input_tokens": response.usage.prompt_tokens if response.usage else 0,
                     "output_tokens": response.usage.completion_tokens if response.usage else 0,
                 },
-                metadata={"model": self.model_id, "local": True},
+                metadata={"model": self.model_id, "provider": self._base_url},
             )
         except Exception as e:
             return AgentResponse(

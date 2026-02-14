@@ -5,8 +5,11 @@ Each sub-swarm composes its own agent team. A different model type
 reviews every piece of work against a strict checklist. Work gets
 sent back if it doesn't pass.
 
-All compute runs on provider servers (Anthropic, OpenAI, Google).
-Llama can run locally via Ollama or remotely via Groq/Together.
+All compute runs on provider servers:
+- Claude: Anthropic API (pay-per-token, separate from Pro subscription)
+- Codex: OpenAI API (pay-per-token, separate from ChatGPT Plus)
+- Gemini: Google AI Studio API (free tier available, separate from Gemini Advanced)
+- Llama: Groq API (free tier available, very fast)
 """
 
 from __future__ import annotations
@@ -117,8 +120,8 @@ class Orchestrator:
         claude_model: str = "claude-sonnet-4-20250514",
         codex_model: str = "o3-mini",
         gemini_model: str = "gemini-2.0-flash",
-        llama_model: str = "llama3.2",
-        llama_base_url: str | None = None,
+        llama_model: str = "llama-3.2-3b-preview",
+        llama_provider: str = "groq",
         depth: int = 0,
         max_depth: int = 10,
         agents: dict[str, BaseAgent] | None = None,
@@ -139,7 +142,7 @@ class Orchestrator:
             "codex_model": codex_model,
             "gemini_model": gemini_model,
             "llama_model": llama_model,
-            "llama_base_url": llama_base_url,
+            "llama_provider": llama_provider,
         }
 
         self.memento = Memento(persist_path=memento_path)
@@ -170,7 +173,7 @@ class Orchestrator:
             "gemini": GeminiAgent(model_id=self._config["gemini_model"]),
             "llama": LlamaAgent(
                 model_id=self._config["llama_model"],
-                base_url=self._config["llama_base_url"],
+                provider=self._config["llama_provider"],
             ),
         }
 
@@ -194,7 +197,7 @@ class Orchestrator:
             "claude": ClaudeAgent(model_id=self._config["claude_model"]),
             "llama": LlamaAgent(
                 model_id=self._config["llama_model"],
-                base_url=self._config["llama_base_url"],
+                provider=self._config["llama_provider"],
             ),
         }
 
