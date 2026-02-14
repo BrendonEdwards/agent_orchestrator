@@ -1,10 +1,12 @@
-"""Main Orchestrator - recursive multi-agent coordination.
+"""Fractal multi-agent orchestrator.
 
-Any agent can spawn its own sub-swarm of agents using the same pattern:
-stateless agents, memento notes, grunt work to Llama. This is recursive -
-a sub-swarm can spawn sub-sub-swarms, limited by depth.
+The same pattern repeats at every scale: decompose, delegate, synthesize.
+Each sub-swarm composes its own agent team based on what the subtask
+needs - a code-heavy task spawns more Codex, an image task spawns more
+Gemini. It's self-similar all the way down.
 
-The whole thing is callable from CLI with a few words.
+Recursion stops naturally when a task is simple enough for one agent.
+A cost budget acts as a safety net.
 """
 
 from __future__ import annotations
@@ -28,30 +30,48 @@ _GRUNT_KEYWORDS = [
     "boilerplate", "rename", "reorder", "cleanup", "prettify",
 ]
 
+# Keywords that signal which agent type a subtask needs
+_AGENT_SIGNALS = {
+    "codex": ["code", "program", "function", "implement", "debug", "algorithm",
+              "class", "module", "api", "endpoint", "test", "refactor"],
+    "gemini": ["image", "picture", "photo", "audio", "sound", "video",
+               "visual", "diagram", "describe image", "transcribe"],
+    "llama": ["format", "convert", "sort", "list", "template", "boilerplate",
+              "cleanup", "extract", "rename"],
+    "claude": ["design", "architect", "plan", "analyze", "review", "explain",
+               "reason", "compare", "evaluate", "synthesize"],
+}
+
 
 class Orchestrator:
-    """Recursive multi-agent orchestrator.
+    """Fractal multi-agent orchestrator.
 
-    Each orchestrator manages a team of stateless agents. Any orchestrator
-    can spawn child orchestrators - sub-swarms that handle subtasks
-    independently with their own memento and fresh agents.
+    Self-similar at every scale:
+    1. Task comes in
+    2. Is it grunt work? -> Llama
+    3. Is it simple? -> best single agent
+    4. Is it complex? -> decompose, spawn sub-swarms, synthesize
+    5. Each sub-swarm does the same thing (goto 1)
 
-        User: "build me a REST API"
-            |
-        Orchestrator (depth=0)
-            |
-          Claude: "complex task, break it down"
-            |
-        ┌───┼────────┐
-        |   |        |
-      Codex swarm  Claude swarm  Llama (grunt)
-      (depth=1)    (depth=1)
-      |   |   |    |   |
-     sub-agents   sub-agents
-      (fresh)      (fresh)
+    Sub-swarms compose their own agent teams:
 
-    Each level has its own Memento. Parent notes are inherited as
-    context so sub-swarms know the bigger picture.
+        "build a web app with image upload"
+                    |
+            Orchestrator (d=0)
+                    |
+            Claude decomposes:
+            ┌───────┼──────────┐
+            |       |          |
+         code     images    boilerplate
+            |       |          |
+        Orchestrator Orchestrator  Llama
+        team:       team:         (grunt)
+        2x Codex    2x Gemini
+        1x Claude   1x Claude
+        1x Llama    1x Llama
+            |           |
+        can spawn     can spawn
+        more...       more...
     """
 
     def __init__(
@@ -64,12 +84,13 @@ class Orchestrator:
         llama_model: str = "llama3.2",
         llama_base_url: str | None = None,
         depth: int = 0,
-        max_depth: int = 3,
+        max_depth: int = 10,
+        agents: dict[str, BaseAgent] | None = None,
     ):
         self.depth = depth
         self.max_depth = max_depth
 
-        # Config stored for spawning children
+        # Config for spawning children
         self._config = {
             "rules_path": rules_path,
             "claude_model": claude_model,
@@ -83,17 +104,15 @@ class Orchestrator:
         self.rules = RulesLoader(rules_path=rules_path)
         self.rules.load()
 
-        self.claude = ClaudeAgent(model_id=claude_model)
-        self.codex = CodexAgent(model_id=codex_model)
-        self.gemini = GeminiAgent(model_id=gemini_model)
-        self.llama = LlamaAgent(model_id=llama_model, base_url=llama_base_url)
+        # Agents: either custom (from fractal spawn) or default team
+        if agents:
+            self._agents = agents
+        else:
+            self._agents = self._build_default_team()
 
-        self._agents: dict[str, BaseAgent] = {
-            "claude": self.claude,
-            "codex": self.codex,
-            "gemini": self.gemini,
-            "llama": self.llama,
-        }
+        # Always need a claude reference for decomposition/synthesis
+        self._claude = self._find_agent(ClaudeAgent) or ClaudeAgent(model_id=claude_model)
+        self._llama = self._find_agent(LlamaAgent)
 
         self.router = MessageRouter(
             agents=self._agents,
@@ -101,23 +120,84 @@ class Orchestrator:
             memento=self.memento,
         )
 
-    def spawn(self, inherit_notes: bool = True) -> Orchestrator:
-        """Spawn a child orchestrator (sub-swarm).
+    def _build_default_team(self) -> dict[str, BaseAgent]:
+        """Default team: one of each."""
+        return {
+            "claude": ClaudeAgent(model_id=self._config["claude_model"]),
+            "codex": CodexAgent(model_id=self._config["codex_model"]),
+            "gemini": GeminiAgent(model_id=self._config["gemini_model"]),
+            "llama": LlamaAgent(
+                model_id=self._config["llama_model"],
+                base_url=self._config["llama_base_url"],
+            ),
+        }
 
-        The child gets its own fresh agents and memento. If inherit_notes
-        is True, the parent's memento briefing is copied as a high-priority
-        note so the sub-swarm knows the bigger picture.
+    def _find_agent(self, agent_type: type) -> BaseAgent | None:
+        """Find the first agent of a given type in the team."""
+        for agent in self._agents.values():
+            if isinstance(agent, agent_type):
+                return agent
+        return None
+
+    def _build_team_for(self, subtask: str) -> dict[str, BaseAgent]:
+        """Build a custom agent team weighted for a specific subtask.
+
+        This is the fractal part - each sub-swarm gets a team composed
+        for its specific needs, not a clone of the parent.
+        """
+        task_lower = subtask.lower()
+
+        # Score each agent type for this subtask
+        scores = {}
+        for agent_name, keywords in _AGENT_SIGNALS.items():
+            score = sum(1 for kw in keywords if kw in task_lower)
+            scores[agent_name] = score
+
+        # Always include Claude (brain) and Llama (grunt)
+        team: dict[str, BaseAgent] = {
+            "claude": ClaudeAgent(model_id=self._config["claude_model"]),
+            "llama": LlamaAgent(
+                model_id=self._config["llama_model"],
+                base_url=self._config["llama_base_url"],
+            ),
+        }
+
+        # Add the most relevant agent type, with extra instances if strong signal
+        best = max(scores, key=scores.get)  # type: ignore[arg-type]
+        best_score = scores[best]
+
+        # Always include at least one Codex and one Gemini
+        team["codex"] = CodexAgent(model_id=self._config["codex_model"])
+        team["gemini"] = GeminiAgent(model_id=self._config["gemini_model"])
+
+        # Add extra instances of the dominant type
+        if best_score >= 2 and best not in ("claude", "llama"):
+            for i in range(min(best_score - 1, 3)):
+                agent_class = CodexAgent if best == "codex" else GeminiAgent
+                model = self._config[f"{best}_model"]
+                team[f"{best}_{i + 2}"] = agent_class(model_id=model)
+
+        return team
+
+    def spawn(self, subtask: str | None = None, inherit_notes: bool = True) -> Orchestrator:
+        """Spawn a child orchestrator with a team built for the subtask.
+
+        If subtask is provided, the child's team is weighted for that task.
+        Otherwise it gets a default team.
         """
         if self.depth >= self.max_depth:
             raise RecursionError(
-                f"Max swarm depth ({self.max_depth}) reached. "
-                f"Task may be too complex to decompose further."
+                f"Max depth ({self.max_depth}) reached. Cannot decompose further."
             )
+
+        # Build a team customized for this subtask
+        team = self._build_team_for(subtask) if subtask else None
 
         child = Orchestrator(
             **self._config,
             depth=self.depth + 1,
             max_depth=self.max_depth,
+            agents=team,
         )
 
         if inherit_notes:
@@ -128,85 +208,104 @@ class Orchestrator:
         return child
 
     async def run(self, task: str) -> str:
-        """Run a task. May spawn sub-swarms for complex work."""
+        """Run a task. Fractal: same pattern at every scale.
+
+        1. Grunt work? -> Llama
+        2. Simple? -> best single agent
+        3. Complex? -> decompose, spawn sub-swarms, synthesize
+        4. Each sub-swarm repeats from step 1
+        """
         self.memento.note("goal", task[:150], priority=3)
 
-        # Grunt work -> Llama directly
+        # Grunt work -> straight to Llama
         if self._is_grunt_work(task):
-            self.memento.note("route", "llama:grunt", priority=1)
-            response = await self.router.delegate_grunt_work(task)
-            if response.success:
-                self.memento.note("result", response.content[:150], priority=2)
-                return response.content
+            return await self._do_grunt(task)
 
-        # Ask Claude to break the task down
+        # Decompose: Claude decides if this needs splitting
         subtasks = await self._decompose(task)
 
-        if subtasks and len(subtasks) > 1 and self.depth < self.max_depth:
-            # Complex task: spawn sub-swarms for each subtask
-            return await self._run_swarm(subtasks)
+        # Multiple subtasks and we can still go deeper -> fractal
+        if len(subtasks) > 1 and self.depth < self.max_depth:
+            return await self._run_fractal(subtasks)
 
-        # Simple enough for a single agent
+        # Leaf node: single agent handles it
+        return await self._run_single(task)
+
+    async def _do_grunt(self, task: str) -> str:
+        """Grunt work path."""
+        self.memento.note("route", "llama:grunt", priority=1)
+        if self._llama:
+            msg = AgentMessage(source="orchestrator", target="llama", content=task)
+            response = await self._llama.send(msg)
+            if response.success:
+                self.memento.note("done", response.content[:150], priority=2)
+                return response.content
+        # Llama unavailable, fall through to single agent
+        return await self._run_single(task)
+
+    async def _run_single(self, task: str) -> str:
+        """Single agent handles the task (leaf node of the fractal)."""
         primary = self.rules.get_best_agent_for(task) or "claude"
-        self.memento.note("route", f"{primary}:primary", priority=1)
+        self.memento.note("route", f"{primary}:leaf", priority=1)
 
+        # Determine if we need multiple agents
         agents_to_use = [primary]
         task_lower = task.lower()
-        if any(kw in task_lower for kw in ["code", "program", "function", "implement", "debug"]):
-            if "codex" not in agents_to_use:
-                agents_to_use.append("codex")
-        if any(kw in task_lower for kw in ["image", "picture", "photo", "audio", "sound", "video"]):
-            if "gemini" not in agents_to_use:
-                agents_to_use.append("gemini")
+        for agent_name, keywords in _AGENT_SIGNALS.items():
+            if agent_name != primary and agent_name in self._agents:
+                if any(kw in task_lower for kw in keywords):
+                    agents_to_use.append(agent_name)
 
         if len(agents_to_use) == 1:
+            if primary not in self._agents:
+                primary = "claude"
             msg = AgentMessage(source="orchestrator", target=primary, content=task)
             response = await self.router.route(msg)
             if response.success:
-                self.memento.note("result", response.content[:150], priority=2)
+                self.memento.note("done", response.content[:150], priority=2)
             return response.content if response.success else f"Failed: {response.error}"
 
+        # Multiple agents, parallel
         msg = AgentMessage(source="orchestrator", target="broadcast", content=task)
         results = await self.router.broadcast(msg, targets=agents_to_use)
         successful = [r for r in results.values() if r.success]
 
         if not successful:
-            return "All agents failed. Check health and API keys."
+            return "All agents failed."
 
         if len(successful) == 1:
-            final = successful[0].content
-        else:
-            synthesis = await self.claude.synthesize(
-                successful, memento=self.memento.briefing()
-            )
-            final = synthesis.content
+            return successful[0].content
 
-        self.memento.note("result", final[:150], priority=2)
-        return final
+        synthesis = await self._claude.synthesize(
+            successful, memento=self.memento.briefing()
+        )
+        return synthesis.content
 
     async def _decompose(self, task: str) -> list[str]:
-        """Ask Claude to break a complex task into independent subtasks."""
+        """Claude breaks a task into independent subtasks, or returns it as-is."""
         msg = AgentMessage(
             source="orchestrator",
             target="claude",
             memento=self.memento.briefing(),
             content=(
-                "Break this task into independent subtasks that can run in parallel. "
+                "Break this task into 2-5 independent subtasks that can run in parallel. "
                 "Return ONLY a numbered list, one subtask per line. "
-                "If the task is simple enough for one agent, return just the task itself.\n\n"
+                "If the task is simple enough for one agent, return ONLY the task itself "
+                "as a single line with no numbering.\n\n"
                 f"Task: {task}"
             ),
         )
-        response = await self.claude.send(msg)
+        response = await self._claude.send(msg)
         if not response.success:
             return [task]
 
-        # Parse numbered list
         lines = response.content.strip().split("\n")
         subtasks = []
         for line in lines:
             line = line.strip()
-            # Strip numbering like "1.", "1)", "- "
+            if not line:
+                continue
+            # Strip numbering: "1.", "1)", "- ", "* "
             for prefix in [".", ")", "- ", "* "]:
                 idx = line.find(prefix)
                 if idx != -1 and idx < 4:
@@ -217,35 +316,31 @@ class Orchestrator:
 
         return subtasks if subtasks else [task]
 
-    async def _run_swarm(self, subtasks: list[str]) -> str:
-        """Spawn sub-swarms and run subtasks in parallel."""
+    async def _run_fractal(self, subtasks: list[str]) -> str:
+        """Spawn sub-swarms for each subtask, run in parallel, synthesize.
+
+        Each sub-swarm gets a team weighted for its subtask.
+        Each sub-swarm can decompose further - same pattern, deeper.
+        """
         self.memento.note(
-            "swarm",
-            f"spawning {len(subtasks)} sub-swarms at depth {self.depth + 1}",
+            "fractal",
+            f"d={self.depth}->d={self.depth + 1}, {len(subtasks)} branches",
             priority=2,
         )
 
-        async def run_subtask(subtask: str) -> str:
-            child = self.spawn(inherit_notes=True)
+        async def run_branch(subtask: str) -> str:
+            child = self.spawn(subtask=subtask, inherit_notes=True)
             return await child.run(subtask)
 
         results = await asyncio.gather(
-            *(run_subtask(st) for st in subtasks),
+            *(run_branch(st) for st in subtasks),
             return_exceptions=True,
         )
 
-        # Collect results
-        parts = []
-        for subtask, result in zip(subtasks, results):
-            if isinstance(result, Exception):
-                parts.append(f"[FAILED: {subtask}]: {result}")
-            else:
-                parts.append(f"[{subtask[:50]}]: {result}")
-
-        # Synthesize all sub-swarm results
-        synthesis_responses = [
+        # Build responses for synthesis
+        responses = [
             AgentResponse(
-                agent_name=f"swarm_{i}",
+                agent_name=f"d{self.depth + 1}_{i}",
                 content=str(r) if not isinstance(r, Exception) else "",
                 success=not isinstance(r, Exception),
                 error=str(r) if isinstance(r, Exception) else None,
@@ -253,37 +348,42 @@ class Orchestrator:
             for i, r in enumerate(results)
         ]
 
-        successful = [r for r in synthesis_responses if r.success]
+        successful = [r for r in responses if r.success]
         if not successful:
-            return "All sub-swarms failed."
+            return "All branches failed."
 
         if len(successful) == 1:
-            final = successful[0].content
-        else:
-            synthesis = await self.claude.synthesize(
-                successful, memento=self.memento.briefing()
-            )
-            final = synthesis.content
+            return successful[0].content
 
-        self.memento.note("result", final[:150], priority=2)
-        return final
+        synthesis = await self._claude.synthesize(
+            successful, memento=self.memento.briefing()
+        )
+        self.memento.note("done", synthesis.content[:150], priority=2)
+        return synthesis.content
 
     async def send_to(self, agent_name: str, content: str) -> AgentResponse:
-        """Send a message directly to a specific agent."""
+        """Send directly to a specific agent."""
         msg = AgentMessage(source="user", target=agent_name, content=content)
         return await self.router.route(msg)
 
     async def grunt(self, task: str) -> str:
-        """Send grunt work directly to Llama."""
-        return await self.llama.do_grunt_work(task)
+        """Grunt work -> Llama."""
+        if self._llama:
+            msg = AgentMessage(source="orchestrator", target="llama", content=task)
+            resp = await self._llama.send(msg)
+            return resp.content if resp.success else ""
+        return ""
 
     async def health_check(self) -> dict[str, bool]:
-        """Check the health of all agents."""
         return await self.router.health_check_all()
 
     def notes(self) -> str:
-        """Get the current memento briefing."""
         return self.memento.briefing()
+
+    @property
+    def team(self) -> list[str]:
+        """Who's on this orchestrator's team."""
+        return list(self._agents.keys())
 
     def _is_grunt_work(self, task: str) -> bool:
         task_lower = task.lower()

@@ -53,18 +53,27 @@ def main() -> None:
     parser.add_argument(
         "--max-depth",
         type=int,
-        default=3,
-        help="Max swarm recursion depth (default: 3)",
+        default=10,
+        help="Max fractal depth (default: 10, stops naturally when tasks are simple)",
+    )
+    parser.add_argument(
+        "--team",
+        action="store_true",
+        help="Show the agent team composition",
     )
 
     args = parser.parse_args()
     task = " ".join(args.task) if args.task else ""
 
-    if not task and not args.health and not args.notes:
+    if not task and not args.health and not args.notes and not args.team:
         parser.print_help()
         sys.exit(1)
 
     orch = Orchestrator(rules_path=args.rules, max_depth=args.max_depth)
+
+    if args.team:
+        print(f"Team: {', '.join(orch.team)}")
+        return
 
     if args.health:
         results = asyncio.run(orch.health_check())
