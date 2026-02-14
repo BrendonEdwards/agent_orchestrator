@@ -53,13 +53,8 @@ def main() -> None:
     parser.add_argument(
         "--max-depth",
         type=int,
-        default=1,
-        help="Max fractal depth (default: 1 = shallow fan-out, fast)",
-    )
-    parser.add_argument(
-        "--deep",
-        action="store_true",
-        help="Deep mode: allow full fractal recursion (depth=3, slower but thorough)",
+        default=10,
+        help="Safety rail for max recursion depth (default: 10)",
     )
     parser.add_argument(
         "--team",
@@ -91,10 +86,9 @@ def main() -> None:
         parser.print_help()
         sys.exit(1)
 
-    depth = 3 if args.deep else args.max_depth
     orch = Orchestrator(
         rules_path=args.rules,
-        max_depth=depth,
+        max_depth=args.max_depth,
         qa_enabled=not args.no_qa,
         max_qa_retries=args.qa_retries,
         qa_pass_score=args.qa_threshold,

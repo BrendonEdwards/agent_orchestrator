@@ -11,8 +11,8 @@ Direct API calls - fast, no subprocess overhead, structured errors:
 - Gemini: Google GenAI API (GEMINI_API_KEY, free tier available)
 - Llama: Groq API (GROQ_API_KEY, free tier)
 
-Default depth=1 (shallow fan-out). Decompose once, delegate, QA,
-synthesize. Use --max-depth for deeper recursion if needed.
+Depth is automatic. "2+2" stays at level 0. "Build a C compiler"
+goes as deep as it needs to. max_depth=10 is just a safety rail.
 """
 
 from __future__ import annotations
@@ -126,7 +126,7 @@ class Orchestrator:
         llama_model: str = "llama-3.2-3b-preview",
         llama_provider: str = "groq",
         depth: int = 0,
-        max_depth: int = 1,
+        max_depth: int = 10,
         agents: dict[str, BaseAgent] | None = None,
         qa_enabled: bool = True,
         max_qa_retries: int = _MAX_QA_RETRIES,
