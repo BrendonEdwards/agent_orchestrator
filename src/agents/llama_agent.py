@@ -1,7 +1,16 @@
-"""Llama agent - the dogs body. Grunt work via ollama.
+"""Llama agent - the dogs body. Grunt work.
 
 Stateless (obviously - it's doing grunt work, not thinking).
 No memento notes needed for simple tasks.
+
+Runs on:
+- Ollama locally: LLAMA_BASE_URL=http://localhost:11434/v1 (default)
+- Groq cloud:     LLAMA_BASE_URL=https://api.groq.com/openai/v1
+                  GROQ_API_KEY=your-key
+- Together cloud: LLAMA_BASE_URL=https://api.together.xyz/v1
+                  TOGETHER_API_KEY=your-key
+
+Set the base URL to a cloud provider and you never run anything locally.
 """
 
 from __future__ import annotations
@@ -12,12 +21,21 @@ from typing import Any
 
 from src.agents.base import AgentCapability, AgentMessage, AgentResponse, BaseAgent
 
+# Known cloud providers that need API keys
+_CLOUD_PROVIDERS = {
+    "groq.com": "GROQ_API_KEY",
+    "together.xyz": "TOGETHER_API_KEY",
+}
+
 
 class LlamaAgent(BaseAgent):
-    """Llama: grunt work via ollama. Formatting, boilerplate, simple tasks.
+    """Llama: grunt work. Formatting, boilerplate, simple tasks.
 
-    Stateless and doesn't even need memento notes for most tasks.
-    Just give it a simple job and get a result.
+    Stateless. Runs via any OpenAI-compatible endpoint:
+    - Ollama (local, default)
+    - Groq (cloud, fast)
+    - Together AI (cloud)
+    - Any OpenAI-compatible server
     """
 
     def __init__(
@@ -39,13 +57,23 @@ class LlamaAgent(BaseAgent):
         )
         self._client: Any = None
 
+    def _resolve_api_key(self) -> str:
+        """Resolve API key based on the base URL.
+
+        Local Ollama doesn't need one. Cloud providers do.
+        """
+        for domain, env_var in _CLOUD_PROVIDERS.items():
+            if domain in self._base_url:
+                return os.environ.get(env_var, "")
+        return "not-needed"
+
     def _get_client(self) -> Any:
         if self._client is None:
             import openai
 
             self._client = openai.AsyncOpenAI(
                 base_url=self._base_url,
-                api_key="not-needed",
+                api_key=self._resolve_api_key(),
             )
         return self._client
 

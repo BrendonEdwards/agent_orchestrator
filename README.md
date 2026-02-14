@@ -1,6 +1,6 @@
 # Agent Orchestrator
 
-Fractal multi-model AI agent swarm. Just say what you need.
+Fractal multi-model AI agent swarm with cross-model QA. Just say what you need.
 
 ```bash
 python -m src "build me a web app with image upload"
@@ -8,7 +8,7 @@ python -m src "build me a web app with image upload"
 
 ## How it works
 
-Same pattern at every scale: **decompose, delegate, synthesize**.
+Same pattern at every scale: **decompose, checklist, delegate, QA, synthesize**.
 
 ```
     "build a web app with image upload"
@@ -16,7 +16,8 @@ Same pattern at every scale: **decompose, delegate, synthesize**.
         Orchestrator (d=0)
         team: claude, codex, gemini, llama
                 |
-        Claude: "3 subtasks"
+        Claude decomposes into 3 subtasks
+        Claude generates a checklist for each
                 |
     ┌───────────┼───────────┐
     |           |           |
@@ -24,48 +25,89 @@ Same pattern at every scale: **decompose, delegate, synthesize**.
    API code"    processing"  templates"
     |           |           |
  Orch (d=1)  Orch (d=1)    Llama
- team:       team:         (grunt)
+ team:       team:         (grunt, no QA)
  2x Codex    2x Gemini
  1x Claude   1x Claude
  1x Gemini   1x Codex
  1x Llama    1x Llama
     |           |
- could       could
- decompose   decompose
- further...  further...
+ Codex does  Gemini does
+ the work    the work
+    |           |
+ Claude QAs  Codex QAs     <- DIFFERENT model reviews
+ score: 5/10 score: 8/10
+    |           |
+ FAIL!       PASS
+ sent back   done
+ w/ feedback
+    |
+ Codex fixes
+    |
+ Claude QAs
+ score: 9/10
+    |
+ PASS
 ```
-
-Each sub-swarm builds its own team weighted for the subtask. A code-heavy
-branch gets extra Codex instances. An image branch gets extra Gemini.
-Recursion stops naturally when Claude decides a task is simple enough
-for one agent.
 
 ## Core Ideas
 
-**Fractal** - The same structure repeats at every scale. An orchestrator decomposes a task into subtasks. Each subtask gets its own orchestrator with a custom-composed team. Those can decompose further. Self-similar all the way down. No fixed depth limit - it stops when tasks become simple.
+**Fractal** - Self-similar at every scale. An orchestrator decomposes, delegates to sub-swarms, each sub-swarm can decompose further. No fixed depth - stops when tasks are simple enough for one agent.
 
-**Stateless + Memento** - Like the film. Every agent call is a fresh spawn. No conversation history, no context rot. The only memory is ~20 ultra-concise survival notes stamped onto each message. Parent notes are inherited by children so sub-swarms know the bigger picture.
+**Cross-model QA** - Every piece of work is reviewed by a DIFFERENT model type. Claude's work reviewed by Codex. Codex's work reviewed by Claude. Gemini's work reviewed by Claude. Different models have different blind spots - that's the point.
 
-**Llama as dogs body** - Ollama handles grunt work that doesn't need thinking. Doesn't get memento notes - just the task.
+**Checklist-driven** - Before any work begins, Claude generates a strict checklist of verifiable pass/fail criteria. The worker sees the checklist. The reviewer scores against it. Failed items get sent back with specific feedback.
 
-**Compact protocol** - Agents don't need English to talk to each other:
+**Retry loop** - If work doesn't pass QA (default threshold: 7/10), it goes back to the original agent with the reviewer's feedback and the specific failed checklist items. Max 2 retries, then accepts best effort.
 
+**Stateless + Memento** - Every agent call is a fresh spawn. No conversation history, no context rot. The only memory is ~20 ultra-concise survival notes. Parent notes flow down to sub-swarms.
+
+**Llama as dogs body** - Grunt work goes straight to Llama, no QA needed.
+
+## Where compute runs
+
+**Nothing runs on your machine** (unless you want it to).
+
+| Agent | Provider | Compute location |
+|-------|----------|-----------------|
+| Claude | Anthropic API | Anthropic's servers |
+| Codex | OpenAI API | OpenAI's servers |
+| Gemini | Google AI API | Google's servers |
+| Llama | Configurable | See below |
+
+Llama is the only one that *can* run locally (via Ollama), but doesn't have to:
+
+```bash
+# Local (default) - runs on your machine
+export LLAMA_BASE_URL="http://localhost:11434/v1"
+
+# Groq cloud - runs on Groq's servers, very fast
+export LLAMA_BASE_URL="https://api.groq.com/openai/v1"
+export GROQ_API_KEY="your-key"
+
+# Together AI cloud - runs on Together's servers
+export LLAMA_BASE_URL="https://api.together.xyz/v1"
+export TOGETHER_API_KEY="your-key"
 ```
-English:  "Please write a Python function called sum_evens..."
-Protocol: T:codegen|L:py|N:sum_evens|I:list[int]|O:int|D:sum even vals
-```
+
+Point `LLAMA_BASE_URL` at any OpenAI-compatible endpoint and all compute is remote.
 
 ## CLI
 
 ```bash
-# Just say what you need - it decomposes and swarms automatically
+# Just say what you need
 python -m src "build a REST API for user management"
 
-# Direct to a specific agent
+# Direct to a specific agent (bypasses decomposition)
 python -m src "write a binary search" --agent codex
 
-# Grunt work (straight to Llama)
+# Grunt work (straight to Llama, no QA)
 python -m src "format this JSON: {a:1,b:2}" --grunt
+
+# Disable QA for speed
+python -m src "quick prototype of a login form" --no-qa
+
+# Strict QA (higher threshold, more retries)
+python -m src "implement auth middleware" --qa-threshold 9 --qa-retries 4
 
 # Check what's alive
 python -m src --health
@@ -77,6 +119,52 @@ python -m src --team
 python -m src --notes
 ```
 
+### How to invoke from Claude Code CLI
+
+You're already in a Claude Code session. Here's exactly how to run it:
+
+```bash
+# 1. Make sure you're in the project directory
+cd /path/to/agent_orchestrator
+
+# 2. Install dependencies
+pip install -e .
+
+# 3. Set your API keys
+export ANTHROPIC_API_KEY="sk-ant-..."
+export OPENAI_API_KEY="sk-..."
+export GOOGLE_API_KEY="AI..."
+
+# 4. Optional: point Llama at a cloud provider so nothing runs locally
+export LLAMA_BASE_URL="https://api.groq.com/openai/v1"
+export GROQ_API_KEY="gsk_..."
+
+# 5. Run it - just say what you need
+python -m src "build a REST API with auth and tests"
+
+# 6. Or from Python directly
+python -c "
+import asyncio
+from src import Orchestrator
+
+async def main():
+    orch = Orchestrator()
+    result = await orch.run('build a REST API with auth and tests')
+    print(result)
+
+asyncio.run(main())
+"
+```
+
+That's it. The orchestrator will:
+1. Ask Claude to decompose the task
+2. Generate checklists for each subtask
+3. Spawn fractal sub-swarms with weighted teams
+4. Agents do the work (on provider servers)
+5. Different models QA each other's work
+6. Failed work gets sent back with feedback
+7. Results synthesized and returned
+
 ## Python API
 
 ```python
@@ -84,25 +172,42 @@ import asyncio
 from src import Orchestrator
 
 async def main():
-    orch = Orchestrator(rules_path="rules.md")
+    orch = Orchestrator(
+        rules_path="rules.md",
+        qa_enabled=True,       # cross-model QA on
+        qa_pass_score=7,       # minimum score to pass
+        max_qa_retries=2,      # retries before accepting
+    )
 
-    # Complex task -> fractal decomposition
+    # Complex task -> fractal decomposition + QA at every level
     result = await orch.run("Build a web app with image upload")
     print(result)
 
-    # Grunt work -> straight to Llama
+    # Grunt work -> straight to Llama, no QA
     await orch.grunt("sort alphabetically: zebra, apple, mango")
 
-    # Manual fractal spawn with custom team for subtask
+    # Manual fractal spawn with custom team
     child = orch.spawn(subtask="implement the image processing pipeline")
-    print(child.team)  # -> ['claude', 'gemini', 'gemini_2', 'codex', 'llama']
-    result = await child.run("implement the image processing pipeline")
+    print(child.team)  # ['claude', 'gemini', 'gemini_2', 'codex', 'llama']
 
-    # Check survival notes
+    # Disable QA for a quick prototype
+    fast_orch = Orchestrator(qa_enabled=False)
+    await fast_orch.run("quick prototype of a login page")
+
+    # Check survival notes (includes QA scores)
     print(orch.notes())
 
 asyncio.run(main())
 ```
+
+## QA Pairings
+
+| Worker | Reviewer | Why |
+|--------|----------|-----|
+| Claude | Codex (OpenAI) | Codex catches logical gaps Claude might rationalize past |
+| Codex | Claude | Claude catches architectural issues Codex might ignore |
+| Gemini | Claude | Claude validates multimodal output descriptions |
+| Llama | None | Grunt work, not worth QA cost |
 
 ## Setup
 
@@ -111,10 +216,14 @@ pip install -e .
 ```
 
 ```bash
-export ANTHROPIC_API_KEY="your-key"                # Claude
-export OPENAI_API_KEY="your-key"                   # Codex
-export GOOGLE_API_KEY="your-key"                   # Gemini
-export LLAMA_BASE_URL="http://localhost:11434/v1"   # Llama (ollama)
+export ANTHROPIC_API_KEY="your-key"                # Claude (Anthropic servers)
+export OPENAI_API_KEY="your-key"                   # Codex (OpenAI servers)
+export GOOGLE_API_KEY="your-key"                   # Gemini (Google servers)
+
+# Pick ONE for Llama:
+export LLAMA_BASE_URL="http://localhost:11434/v1"   # Ollama (local)
+export LLAMA_BASE_URL="https://api.groq.com/openai/v1"  # Groq (cloud)
+export GROQ_API_KEY="your-key"
 ```
 
 ## Project Structure
@@ -122,13 +231,13 @@ export LLAMA_BASE_URL="http://localhost:11434/v1"   # Llama (ollama)
 ```
 src/
 ├── __main__.py             # CLI - just say what you need
-├── orchestrator.py         # Fractal swarm orchestrator
+├── orchestrator.py         # Fractal orchestrator + QA loop
 ├── agents/
 │   ├── base.py             # Stateless agent interface
-│   ├── claude_agent.py     # Claude (brain)
-│   ├── codex_agent.py      # Codex (code)
-│   ├── gemini_agent.py     # Gemini (multimodal)
-│   └── llama_agent.py      # Llama (grunt work)
+│   ├── claude_agent.py     # Claude (brain, on Anthropic servers)
+│   ├── codex_agent.py      # Codex (code, on OpenAI servers)
+│   ├── gemini_agent.py     # Gemini (multimodal, on Google servers)
+│   └── llama_agent.py      # Llama (grunt, local or cloud)
 ├── memento/
 │   └── memento.py          # Anti-context-rot survival notes
 ├── routing/

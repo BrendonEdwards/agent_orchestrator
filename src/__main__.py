@@ -19,7 +19,7 @@ from src.orchestrator import Orchestrator
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="agent-orchestrator",
-        description="Multi-model AI agent swarm. Just say what you need.",
+        description="Fractal multi-model AI agent swarm with cross-model QA.",
     )
     parser.add_argument(
         "task",
@@ -33,7 +33,7 @@ def main() -> None:
     parser.add_argument(
         "--grunt", "-g",
         action="store_true",
-        help="Force task to Llama (grunt work)",
+        help="Force task to Llama (grunt work, no QA)",
     )
     parser.add_argument(
         "--health",
@@ -61,6 +61,23 @@ def main() -> None:
         action="store_true",
         help="Show the agent team composition",
     )
+    parser.add_argument(
+        "--no-qa",
+        action="store_true",
+        help="Disable cross-model QA (faster, less reliable)",
+    )
+    parser.add_argument(
+        "--qa-retries",
+        type=int,
+        default=2,
+        help="Max QA retry attempts before accepting (default: 2)",
+    )
+    parser.add_argument(
+        "--qa-threshold",
+        type=int,
+        default=7,
+        help="QA pass score out of 10 (default: 7)",
+    )
 
     args = parser.parse_args()
     task = " ".join(args.task) if args.task else ""
@@ -69,7 +86,13 @@ def main() -> None:
         parser.print_help()
         sys.exit(1)
 
-    orch = Orchestrator(rules_path=args.rules, max_depth=args.max_depth)
+    orch = Orchestrator(
+        rules_path=args.rules,
+        max_depth=args.max_depth,
+        qa_enabled=not args.no_qa,
+        max_qa_retries=args.qa_retries,
+        qa_pass_score=args.qa_threshold,
+    )
 
     if args.team:
         print(f"Team: {', '.join(orch.team)}")
