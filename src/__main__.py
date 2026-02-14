@@ -14,6 +14,7 @@ import asyncio
 import sys
 
 from src.orchestrator import Orchestrator
+from src.tracker import SwarmTracker
 
 
 def main() -> None:
@@ -78,6 +79,22 @@ def main() -> None:
         default=7,
         help="QA pass score out of 10 (default: 7)",
     )
+    parser.add_argument(
+        "--quiet", "-q",
+        action="store_true",
+        help="Suppress live progress output (still prints summary)",
+    )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable all progress output and summary",
+    )
+    parser.add_argument(
+        "--stall-timeout",
+        type=float,
+        default=120.0,
+        help="Seconds before flagging an agent call as stalled (default: 120)",
+    )
 
     args = parser.parse_args()
     task = " ".join(args.task) if args.task else ""
@@ -86,12 +103,20 @@ def main() -> None:
         parser.print_help()
         sys.exit(1)
 
+    # Set up tracker for live visibility
+    use_tracker = not args.no_progress
+    tracker = SwarmTracker(
+        stall_timeout=args.stall_timeout,
+        quiet=args.quiet,
+    ) if use_tracker else None
+
     orch = Orchestrator(
         rules_path=args.rules,
         max_depth=args.max_depth,
         qa_enabled=not args.no_qa,
         max_qa_retries=args.qa_retries,
         qa_pass_score=args.qa_threshold,
+        tracker=tracker,
     )
 
     if args.team:
@@ -110,13 +135,28 @@ def main() -> None:
         print(notes if notes else "(no notes)")
         return
 
-    if args.grunt:
-        result = asyncio.run(orch.grunt(task))
-    elif args.agent:
-        response = asyncio.run(orch.send_to(args.agent, task))
-        result = response.content if response.success else f"Error: {response.error}"
-    else:
-        result = asyncio.run(orch.run(task))
+    # Run with tracker lifecycle
+    async def _run() -> str:
+        if tracker:
+            tracker.start()
+            tracker.start_stall_checker()
+        try:
+            if args.grunt:
+                return await orch.grunt(task)
+            elif args.agent:
+                response = await orch.send_to(args.agent, task)
+                return response.content if response.success else f"Error: {response.error}"
+            else:
+                return await orch.run(task)
+        finally:
+            if tracker:
+                tracker.stop()
+
+    result = asyncio.run(_run())
+
+    # Summary goes to stderr, result to stdout
+    if tracker:
+        tracker.print_summary()
 
     print(result)
 

@@ -25,6 +25,7 @@ from src.agents.llama_agent import LlamaAgent
 from src.memento.memento import Memento
 from src.routing.router import MessageRouter
 from src.rules.loader import RulesLoader
+from src.tracker import SwarmTracker
 
 
 # Simple tasks that should go to Llama
@@ -127,12 +128,14 @@ class Orchestrator:
         qa_enabled: bool = True,
         max_qa_retries: int = _MAX_QA_RETRIES,
         qa_pass_score: int = _QA_PASS_SCORE,
+        tracker: SwarmTracker | None = None,
     ):
         self.depth = depth
         self.max_depth = max_depth
         self.qa_enabled = qa_enabled
         self.max_qa_retries = max_qa_retries
         self.qa_pass_score = qa_pass_score
+        self.tracker = tracker
 
         # Config for spawning children
         self._config = {
@@ -208,6 +211,62 @@ class Orchestrator:
 
         return team
 
+    # ── Tracked agent calls ─────────────────────────────────────────
+
+    async def _tracked_send(
+        self, agent: BaseAgent, message: AgentMessage, label: str = ""
+    ) -> AgentResponse:
+        """Send a message to an agent with tracker instrumentation.
+
+        Wraps agent.send() with begin/end tracking so every API call
+        shows up in the progress stream and token rollup.
+        """
+        if self.tracker is None:
+            return await agent.send(message)
+
+        call_id = await self.tracker.begin_call(
+            agent_name=agent.name,
+            depth=self.depth,
+            task=message.content,
+            label=label,
+        )
+        response = await agent.send(message)
+        await self.tracker.end_call(
+            call_id=call_id,
+            input_tokens=response.token_usage.get("input_tokens", 0),
+            output_tokens=response.token_usage.get("output_tokens", 0),
+            success=response.success,
+        )
+        return response
+
+    async def _tracked_route(
+        self, message: AgentMessage, label: str = ""
+    ) -> AgentResponse:
+        """Route a message with tracker instrumentation.
+
+        Like router.route() but tracks the call. The router still handles
+        memento injection - this just wraps the timing/token tracking.
+        """
+        if self.tracker is None:
+            return await self.router.route(message)
+
+        call_id = await self.tracker.begin_call(
+            agent_name=message.target,
+            depth=self.depth,
+            task=message.content,
+            label=label,
+        )
+
+        response = await self.router.route(message)
+
+        await self.tracker.end_call(
+            call_id=call_id,
+            input_tokens=response.token_usage.get("input_tokens", 0),
+            output_tokens=response.token_usage.get("output_tokens", 0),
+            success=response.success,
+        )
+        return response
+
     # ── Checklist generation ────────────────────────────────────────
 
     async def _generate_checklist(self, task: str) -> list[str]:
@@ -228,7 +287,7 @@ class Orchestrator:
                 f"Task: {task}"
             ),
         )
-        response = await self._claude.send(msg)
+        response = await self._tracked_send(self._claude, msg, label="checklist")
         if not response.success:
             return [f"Task completed correctly: {task}"]
 
@@ -316,7 +375,7 @@ class Orchestrator:
                 "FEEDBACK: specific things to fix (or 'none' if all pass)"
             ),
         )
-        response = await reviewer.send(msg)
+        response = await self._tracked_send(reviewer, msg, label="qa-review")
         if not response.success:
             return QAResult(
                 passed=True, score=10,
@@ -389,6 +448,7 @@ class Orchestrator:
             qa_enabled=self.qa_enabled,
             max_qa_retries=self.max_qa_retries,
             qa_pass_score=self.qa_pass_score,
+            tracker=self.tracker,  # Shared tracker across all depths
         )
 
         if inherit_notes:
@@ -408,6 +468,9 @@ class Orchestrator:
         """
         self.memento.note("goal", task[:150], priority=3)
 
+        if self.tracker:
+            self.tracker.event(self.depth, f"starting: {task[:100]}")
+
         if self._is_grunt_work(task):
             return await self._do_grunt(task)
 
@@ -421,9 +484,11 @@ class Orchestrator:
     async def _do_grunt(self, task: str) -> str:
         """Grunt work -> Llama, no QA."""
         self.memento.note("route", "llama:grunt", priority=1)
+        if self.tracker:
+            self.tracker.event(self.depth, "routed to llama (grunt work)")
         if self._llama:
             msg = AgentMessage(source="orchestrator", target="llama", content=task)
-            response = await self._llama.send(msg)
+            response = await self._tracked_send(self._llama, msg, label="grunt")
             if response.success:
                 self.memento.note("done", response.content[:150], priority=2)
                 return response.content
@@ -436,12 +501,20 @@ class Orchestrator:
             primary = "claude"
         self.memento.note("route", f"{primary}:leaf", priority=1)
 
+        if self.tracker:
+            self.tracker.event(self.depth, f"routed to {primary} (leaf task)")
+
         # Step 1: Generate checklist BEFORE work begins
         checklist: list[str] = []
         if self.qa_enabled:
             checklist = await self._generate_checklist(task)
             checklist_text = " | ".join(checklist[:5])
             self.memento.note("checklist", checklist_text[:150], priority=2)
+            if self.tracker:
+                self.tracker.event(
+                    self.depth,
+                    f"checklist ({len(checklist)} items): {checklist_text[:80]}",
+                )
 
         # Step 2: Agent does the work (with checklist in the brief)
         work_task = task
@@ -465,7 +538,7 @@ class Orchestrator:
     async def _execute_agent(self, agent_name: str, task: str) -> str:
         """Execute a task on a specific agent."""
         msg = AgentMessage(source="orchestrator", target=agent_name, content=task)
-        response = await self.router.route(msg)
+        response = await self._tracked_route(msg, label="work")
         return response.content if response.success else f"Failed: {response.error}"
 
     async def _qa_loop(
@@ -482,10 +555,26 @@ class Orchestrator:
                 priority=2,
             )
 
+            if self.tracker:
+                self.tracker.qa_result(
+                    depth=self.depth,
+                    worker=worker_name,
+                    reviewer=qa.reviewer,
+                    score=qa.score,
+                    passed=qa.passed,
+                    attempt=attempt + 1,
+                )
+
             if qa.passed:
                 return work
 
             if attempt < self.max_qa_retries:
+                if self.tracker:
+                    self.tracker.event(
+                        self.depth,
+                        f"QA failed ({qa.score}/10), sending back to {worker_name} "
+                        f"(attempt {attempt + 2}/{self.max_qa_retries + 1})",
+                    )
                 # Send work back with specific feedback
                 failed_items = [
                     item for item, passed in qa.checklist_scores.items() if not passed
@@ -508,10 +597,18 @@ class Orchestrator:
             f"max retries ({self.max_qa_retries}) exhausted, accepting best effort",
             priority=2,
         )
+        if self.tracker:
+            self.tracker.event(
+                self.depth,
+                f"QA retries exhausted ({self.max_qa_retries}), accepting best effort",
+            )
         return work
 
     async def _decompose(self, task: str) -> list[str]:
         """Claude breaks a task into independent subtasks, or returns it as-is."""
+        if self.tracker:
+            self.tracker.event(self.depth, "decomposing task...")
+
         msg = AgentMessage(
             source="orchestrator",
             target="claude",
@@ -524,7 +621,7 @@ class Orchestrator:
                 f"Task: {task}"
             ),
         )
-        response = await self._claude.send(msg)
+        response = await self._tracked_send(self._claude, msg, label="decompose")
         if not response.success:
             return [task]
 
@@ -542,7 +639,14 @@ class Orchestrator:
             if line:
                 subtasks.append(line)
 
-        return subtasks if subtasks else [task]
+        result = subtasks if subtasks else [task]
+
+        if self.tracker and len(result) > 1:
+            self.tracker.decomposed(self.depth, result)
+        elif self.tracker:
+            self.tracker.event(self.depth, "task is atomic, no decomposition")
+
+        return result
 
     async def _run_fractal(self, subtasks: list[str]) -> str:
         """Spawn sub-swarms, run in parallel, each gets QA'd, synthesize."""
@@ -551,6 +655,12 @@ class Orchestrator:
             f"d={self.depth}->d={self.depth + 1}, {len(subtasks)} branches",
             priority=2,
         )
+
+        if self.tracker:
+            self.tracker.event(
+                self.depth,
+                f"spawning {len(subtasks)} child orchestrators at d={self.depth + 1}",
+            )
 
         async def run_branch(subtask: str) -> str:
             child = self.spawn(subtask=subtask, inherit_notes=True)
@@ -572,14 +682,37 @@ class Orchestrator:
         ]
 
         successful = [r for r in responses if r.success]
+        failed = [r for r in responses if not r.success]
+
+        if self.tracker and failed:
+            self.tracker.event(
+                self.depth,
+                f"{len(failed)}/{len(responses)} branches failed",
+            )
+
         if not successful:
             return "All branches failed."
 
         if len(successful) == 1:
             return successful[0].content
 
-        synthesis = await self._claude.synthesize(
-            successful, memento=self.memento.briefing()
+        if self.tracker:
+            self.tracker.synthesizing(self.depth, len(successful))
+
+        synthesis = await self._tracked_send(
+            self._claude,
+            AgentMessage(
+                source="orchestrator",
+                target="claude",
+                content="Synthesize these agent responses into one coherent answer.\n\n"
+                + "\n\n".join(
+                    f"[{r.agent_name}]: {r.content}" if r.success
+                    else f"[{r.agent_name}]: (failed) {r.error}"
+                    for r in successful
+                ),
+                memento=self.memento.briefing(),
+            ),
+            label="synthesize",
         )
         self.memento.note("done", synthesis.content[:150], priority=2)
         return synthesis.content
@@ -587,13 +720,13 @@ class Orchestrator:
     async def send_to(self, agent_name: str, content: str) -> AgentResponse:
         """Send directly to a specific agent."""
         msg = AgentMessage(source="user", target=agent_name, content=content)
-        return await self.router.route(msg)
+        return await self._tracked_route(msg, label="direct")
 
     async def grunt(self, task: str) -> str:
         """Grunt work -> Llama."""
         if self._llama:
             msg = AgentMessage(source="orchestrator", target="llama", content=task)
-            resp = await self._llama.send(msg)
+            resp = await self._tracked_send(self._llama, msg, label="grunt")
             return resp.content if resp.success else ""
         return ""
 
