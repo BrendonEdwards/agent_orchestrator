@@ -23,9 +23,9 @@ Multi-model AI agent orchestration system with Claude as the central hub.
 
 ## Core Ideas
 
-**Memento** - Like the film. LLMs suffer from "context rot" - as the context window fills, reasoning degrades. Memento keeps ultra-concise survival notes (not a verbose log) so agents can keep functioning with minimal memory. When note space fills up, low-priority notes are dropped, like choosing which tattoo matters most.
+**Stateless agents + Memento** - Like the film. Every agent call is a fresh spawn with zero prior context. No conversation history accumulates, so no context rot. The only "memory" is Memento: ~20 ultra-concise survival notes that get stamped onto each message. When note space fills up, low-priority notes are dropped - like choosing which tattoo matters most. A fresh agent with good notes beats a stale agent with a bloated context window.
 
-**Llama as dogs body** - Ollama handles the grunt work that doesn't need thinking: formatting, boilerplate, cleanup, data conversion. Thinking agents (Claude, Codex, Gemini) don't waste context on menial tasks.
+**Llama as dogs body** - Ollama handles the grunt work that doesn't need thinking: formatting, boilerplate, cleanup, data conversion. Doesn't even get memento notes - just the task and nothing else.
 
 **Compact protocol** - Agents don't need English to talk to each other. Code is in English for humans, but inter-agent messages use a terse key-value format that cuts token usage by ~60%:
 

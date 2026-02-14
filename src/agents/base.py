@@ -1,4 +1,10 @@
-"""Base agent interface for all AI model agents."""
+"""Base agent interface for all AI model agents.
+
+Agents are STATELESS. Every call is a fresh spawn with zero prior context.
+The only "memory" comes from memento notes injected into the message.
+This is by design - context rot is the enemy. A fresh agent with good
+notes outperforms a stale agent with a full context window.
+"""
 
 from __future__ import annotations
 
@@ -24,21 +30,19 @@ class AgentCapability(str, Enum):
     REASONING = "reasoning"
     MATH = "math"
     SUMMARIZATION = "summarization"
-    CONVERSATION = "conversation"
-    FUNCTION_CALLING = "function_calling"
     LOCAL_EXECUTION = "local_execution"
 
 
 class AgentMessage(BaseModel):
-    """A message passed between agents."""
+    """A message to send to an agent. Includes memento notes as context."""
 
     id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
     source: str
     target: str
     content: str
+    memento: str = ""  # Survival notes - the only context the agent gets
     metadata: dict[str, Any] = Field(default_factory=dict)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    parent_message_id: str | None = None
 
 
 class AgentResponse(BaseModel):
@@ -53,18 +57,26 @@ class AgentResponse(BaseModel):
 
 
 class BaseAgent(ABC):
-    """Abstract base class for all AI model agents."""
+    """Abstract base class for all AI model agents.
+
+    Agents are stateless. No conversation history, no accumulated context.
+    Each send() is a fresh call. The memento field on AgentMessage is
+    the only context an agent receives - concise survival notes that
+    let it function without needing to remember anything.
+    """
 
     def __init__(self, name: str, model_id: str, capabilities: list[AgentCapability]):
         self.name = name
         self.model_id = model_id
         self.capabilities = capabilities
-        self._context: list[dict[str, str]] = []
-        self._max_context_messages = 50
 
     @abstractmethod
     async def send(self, message: AgentMessage) -> AgentResponse:
-        """Send a message to this agent and get a response."""
+        """Send a message to this agent and get a response.
+
+        Each call is a fresh spawn. The message.memento field contains
+        concise survival notes - the only context provided.
+        """
 
     @abstractmethod
     async def health_check(self) -> bool:
@@ -73,23 +85,6 @@ class BaseAgent(ABC):
     def supports(self, capability: AgentCapability) -> bool:
         """Check if this agent supports a given capability."""
         return capability in self.capabilities
-
-    def add_to_context(self, role: str, content: str) -> None:
-        """Add a message to the agent's conversation context."""
-        self._context.append({"role": role, "content": content})
-        if len(self._context) > self._max_context_messages:
-            self._context = self._context[-self._max_context_messages :]
-
-    def clear_context(self) -> None:
-        """Clear the agent's conversation context."""
-        self._context.clear()
-
-    def get_context_summary(self) -> str:
-        """Return a compressed summary of context to conserve tokens."""
-        if not self._context:
-            return ""
-        messages = [f"[{m['role']}]: {m['content'][:200]}" for m in self._context[-5:]]
-        return "\n".join(messages)
 
     def __repr__(self) -> str:
         caps = ", ".join(c.value for c in self.capabilities)

@@ -1,9 +1,8 @@
 """Message router for inter-agent communication.
 
-Routes messages between agents using a compact protocol format
-instead of English. Agents talk to each other in terse notation
-to minimize token waste. The Memento system provides survival
-notes to fight context rot on long-running tasks.
+Every routed message gets memento survival notes injected. Agents are
+stateless - the memento briefing is their only context. This is the
+core anti-context-rot mechanism: fresh agents + concise notes.
 """
 
 from __future__ import annotations
@@ -17,14 +16,10 @@ from src.rules.loader import RulesLoader
 
 
 class MessageRouter:
-    """Routes messages between agents using compact protocol format.
+    """Routes messages between stateless agents.
 
-    Key behaviors:
-    - Inter-agent messages are encoded in compact protocol format
-      (not English) to minimize token usage
-    - Memento briefings are injected into messages to fight context rot
-    - Llama gets simple tasks routed to it as grunt work
-    - Claude, Codex, Gemini get the complex work
+    Every message gets the current memento briefing stamped onto it.
+    Agents receive: their task + survival notes. Nothing else.
     """
 
     def __init__(
@@ -38,7 +33,7 @@ class MessageRouter:
         self._memento = memento
 
     async def route(self, message: AgentMessage) -> AgentResponse:
-        """Route a message to its target agent."""
+        """Route a message to its target agent with memento notes injected."""
         target = self._agents.get(message.target)
         if not target:
             return AgentResponse(
@@ -48,21 +43,20 @@ class MessageRouter:
                 error=f"Unknown agent: {message.target}",
             )
 
-        # Inject memento briefing into the message metadata so the
-        # agent has survival notes even if earlier context is lost
+        # Stamp memento briefing onto the message - this is the only
+        # context the fresh agent will have
         briefing = self._memento.briefing()
-        if briefing:
-            message = AgentMessage(
-                source=message.source,
-                target=message.target,
-                content=message.content,
-                metadata={**message.metadata, "memento": briefing},
-                parent_message_id=message.parent_message_id,
-            )
+        msg = AgentMessage(
+            source=message.source,
+            target=message.target,
+            content=message.content,
+            memento=briefing,
+            metadata=message.metadata,
+        )
 
-        response = await target.send(message)
+        response = await target.send(msg)
 
-        # Record key outcomes as memento notes
+        # Record key outcomes as memento notes for future agents
         if response.success and response.content:
             self._memento.note(
                 f"r:{message.target}",
@@ -80,19 +74,12 @@ class MessageRouter:
         description: str,
         **kwargs: str,
     ) -> AgentResponse:
-        """Route using compact protocol format instead of English.
-
-        This is the preferred way for agents to talk to each other.
-        The message is encoded as terse key-value pairs, not prose.
-        """
-        # Build compact message
+        """Route using compact protocol format instead of English."""
         compact = protocol.task_message(
             task_type=task_type,
             description=description,
-            context=self._memento.briefing(),
             **kwargs,
         )
-
         msg = AgentMessage(
             source=source,
             target=target,
@@ -102,14 +89,24 @@ class MessageRouter:
         return await self.route(msg)
 
     async def delegate_grunt_work(self, task: str) -> AgentResponse:
-        """Send simple work to Llama. No thinking required."""
+        """Send simple work to Llama. No memento needed."""
+        target = self._agents.get("llama")
+        if not target:
+            return AgentResponse(
+                agent_name="llama", content="", success=False,
+                error="Llama agent not available",
+            )
+        # Grunt work goes direct - no memento, no context, just the task
         msg = AgentMessage(source="orchestrator", target="llama", content=task)
-        return await self.route(msg)
+        return await target.send(msg)
 
     async def broadcast(
         self, message: AgentMessage, targets: list[str] | None = None
     ) -> dict[str, AgentResponse]:
-        """Send a message to multiple agents in parallel."""
+        """Send a message to multiple agents in parallel.
+
+        Each agent gets a fresh call with memento notes.
+        """
         if targets is None:
             targets = list(self._agents.keys())
 
@@ -121,7 +118,6 @@ class MessageRouter:
                     target=target_name,
                     content=message.content,
                     metadata=message.metadata,
-                    parent_message_id=message.id,
                 )
                 tasks[target_name] = self.route(target_msg)
 
@@ -130,10 +126,7 @@ class MessageRouter:
         for name, result in zip(tasks.keys(), results):
             if isinstance(result, Exception):
                 responses[name] = AgentResponse(
-                    agent_name=name,
-                    content="",
-                    success=False,
-                    error=str(result),
+                    agent_name=name, content="", success=False, error=str(result),
                 )
             else:
                 responses[name] = result
@@ -143,7 +136,7 @@ class MessageRouter:
     async def route_by_capability(
         self, message: AgentMessage, capability: AgentCapability
     ) -> AgentResponse:
-        """Route a message to the best agent for a given capability."""
+        """Route to the best agent for a given capability."""
         best_agent = self._rules.get_best_agent_for(capability.value)
         if best_agent and best_agent in self._agents:
             msg = AgentMessage(
@@ -151,11 +144,9 @@ class MessageRouter:
                 target=best_agent,
                 content=message.content,
                 metadata=message.metadata,
-                parent_message_id=message.id,
             )
             return await self.route(msg)
 
-        # Fallback: find any agent with the capability
         for name, agent in self._agents.items():
             if agent.supports(capability):
                 msg = AgentMessage(
@@ -163,14 +154,11 @@ class MessageRouter:
                     target=name,
                     content=message.content,
                     metadata=message.metadata,
-                    parent_message_id=message.id,
                 )
                 return await self.route(msg)
 
         return AgentResponse(
-            agent_name="router",
-            content="",
-            success=False,
+            agent_name="router", content="", success=False,
             error=f"No agent with capability: {capability.value}",
         )
 

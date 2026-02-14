@@ -1,8 +1,6 @@
-"""Claude agent - the central hub of the orchestrator.
+"""Claude agent - the brain of the orchestrator.
 
-Claude serves as the primary coordinator, delegating tasks to specialized
-agents and synthesizing their results. It has bidirectional connections
-to Codex, Gemini, and Llama Local.
+Stateless. Every call is fresh. Memento notes are the only context.
 """
 
 from __future__ import annotations
@@ -14,13 +12,10 @@ from src.agents.base import AgentCapability, AgentMessage, AgentResponse, BaseAg
 
 
 class ClaudeAgent(BaseAgent):
-    """Claude agent acting as the central orchestration hub.
+    """Claude: task analysis, complex reasoning, synthesis.
 
-    Claude is the primary reasoning engine that:
-    - Analyzes incoming tasks and determines which agents to delegate to
-    - Synthesizes responses from multiple agents
-    - Maintains the high-level conversation context
-    - Coordinates inter-agent communication
+    Stateless - no conversation history. Gets memento survival notes
+    and the current task, nothing else.
     """
 
     def __init__(
@@ -38,8 +33,6 @@ class ClaudeAgent(BaseAgent):
                 AgentCapability.REASONING,
                 AgentCapability.MATH,
                 AgentCapability.SUMMARIZATION,
-                AgentCapability.CONVERSATION,
-                AgentCapability.FUNCTION_CALLING,
             ],
         )
         self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
@@ -53,81 +46,41 @@ class ClaudeAgent(BaseAgent):
         return self._client
 
     async def send(self, message: AgentMessage) -> AgentResponse:
-        """Send a message to Claude and return the response."""
+        """Fresh call to Claude. No history, just memento notes + task."""
         try:
             client = self._get_client()
 
-            system_prompt = (
-                "You are the central coordinator of a multi-agent AI system. "
-                "You analyze tasks, delegate to specialized agents (Codex for code, "
-                "Gemini for multimodal tasks, Llama for local/private processing), "
-                "and synthesize their outputs into coherent responses."
+            system = (
+                "You are the brain of a multi-agent system. "
+                "You have no memory of previous interactions. "
+                "Your survival notes below are all you know about prior context."
             )
-
-            messages = []
-            for ctx in self._context:
-                messages.append({"role": ctx["role"], "content": ctx["content"]})
-            messages.append({"role": "user", "content": message.content})
+            if message.memento:
+                system += f"\n\nSurvival notes:\n{message.memento}"
 
             response = await client.messages.create(
                 model=self.model_id,
                 max_tokens=4096,
-                system=system_prompt,
-                messages=messages,
+                system=system,
+                messages=[{"role": "user", "content": message.content}],
             )
-
-            result_text = response.content[0].text
-            self.add_to_context("user", message.content)
-            self.add_to_context("assistant", result_text)
 
             return AgentResponse(
                 agent_name=self.name,
-                content=result_text,
+                content=response.content[0].text,
                 token_usage={
                     "input_tokens": response.usage.input_tokens,
                     "output_tokens": response.usage.output_tokens,
                 },
-                metadata={"model": self.model_id, "source_message_id": message.id},
+                metadata={"model": self.model_id},
             )
         except Exception as e:
             return AgentResponse(
-                agent_name=self.name,
-                content="",
-                success=False,
-                error=str(e),
+                agent_name=self.name, content="", success=False, error=str(e),
             )
 
-    async def analyze_task(self, task: str) -> dict[str, Any]:
-        """Analyze a task and determine which agents should handle it.
-
-        Returns a routing plan with agent assignments and subtasks.
-        """
-        analysis_prompt = (
-            f"Analyze this task and determine which AI agents should handle it.\n\n"
-            f"Available agents:\n"
-            f"- claude: reasoning, conversation, code review, synthesis\n"
-            f"- codex: code generation, code completion, technical translation\n"
-            f"- gemini: multimodal (images, audio, video), language translation\n"
-            f"- llama: local execution, privacy-sensitive tasks, fast inference\n\n"
-            f"Task: {task}\n\n"
-            f"Respond with a JSON object containing:\n"
-            f"- primary_agent: the main agent for this task\n"
-            f"- supporting_agents: list of agents that should assist\n"
-            f"- subtasks: list of {{agent, description}} objects\n"
-            f"- reasoning: brief explanation of the routing decision"
-        )
-
-        msg = AgentMessage(source="orchestrator", target="claude", content=analysis_prompt)
-        response = await self.send(msg)
-
-        return {
-            "raw_analysis": response.content,
-            "success": response.success,
-            "error": response.error,
-        }
-
-    async def synthesize(self, results: list[AgentResponse]) -> AgentResponse:
-        """Synthesize results from multiple agents into a coherent response."""
+    async def synthesize(self, results: list[AgentResponse], memento: str = "") -> AgentResponse:
+        """Synthesize results from multiple agents. Fresh call."""
         parts = []
         for r in results:
             if r.success:
@@ -135,16 +88,16 @@ class ClaudeAgent(BaseAgent):
             else:
                 parts.append(f"[{r.agent_name}]: (failed) {r.error}")
 
-        synthesis_prompt = (
-            "Synthesize the following agent responses into a single coherent answer.\n\n"
-            + "\n\n".join(parts)
+        msg = AgentMessage(
+            source="orchestrator",
+            target="claude",
+            content="Synthesize these agent responses into one coherent answer.\n\n"
+            + "\n\n".join(parts),
+            memento=memento,
         )
-
-        msg = AgentMessage(source="orchestrator", target="claude", content=synthesis_prompt)
         return await self.send(msg)
 
     async def health_check(self) -> bool:
-        """Check if the Anthropic API is reachable."""
         try:
             client = self._get_client()
             response = await client.messages.create(

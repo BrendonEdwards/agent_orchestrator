@@ -1,7 +1,6 @@
-"""Gemini agent - specialized for multimodal tasks.
+"""Gemini agent - multimodal: language, imagery, sound.
 
-As noted on the whiteboard: "Language / Imagery / Sound."
-Gemini handles tasks involving images, audio, and cross-modal understanding.
+Stateless. Every call is fresh. Memento notes are the only context.
 """
 
 from __future__ import annotations
@@ -13,13 +12,10 @@ from src.agents.base import AgentCapability, AgentMessage, AgentResponse, BaseAg
 
 
 class GeminiAgent(BaseAgent):
-    """Gemini agent for multimodal processing.
+    """Gemini: images, audio, cross-modal tasks.
 
-    Key responsibilities:
-    - Image understanding and generation
-    - Audio/sound processing
-    - Cross-modal tasks (e.g., describing images, transcribing audio)
-    - Language translation with multimodal context
+    Stateless - no conversation history. Gets memento survival notes
+    and the current task, nothing else.
     """
 
     def __init__(
@@ -36,7 +32,6 @@ class GeminiAgent(BaseAgent):
                 AgentCapability.IMAGE_GENERATION,
                 AgentCapability.AUDIO_UNDERSTANDING,
                 AgentCapability.TRANSLATION,
-                AgentCapability.CONVERSATION,
             ],
         )
         self._api_key = api_key or os.environ.get("GOOGLE_API_KEY", "")
@@ -50,26 +45,22 @@ class GeminiAgent(BaseAgent):
         return self._client
 
     async def send(self, message: AgentMessage) -> AgentResponse:
-        """Send a message to Gemini and return the response."""
+        """Fresh call to Gemini. No history, just memento notes + task."""
         try:
             client = self._get_client()
 
-            context_parts = []
-            for ctx in self._context:
-                context_parts.append(f"[{ctx['role']}]: {ctx['content']}")
+            prompt = ""
+            if message.memento:
+                prompt = f"[Survival notes: {message.memento}]\n\n"
+            prompt += message.content
 
-            full_prompt = ""
-            if context_parts:
-                full_prompt = "\n".join(context_parts) + "\n\n"
-            full_prompt += message.content
-
-            # Handle multimodal content if present in metadata
+            # Handle multimodal content
             contents: list[Any] = []
             if "image_data" in message.metadata:
                 contents.append(message.metadata["image_data"])
             if "audio_data" in message.metadata:
                 contents.append(message.metadata["audio_data"])
-            contents.append(full_prompt)
+            contents.append(prompt)
 
             response = await client.aio.models.generate_content(
                 model=self.model_id,
@@ -77,9 +68,6 @@ class GeminiAgent(BaseAgent):
             )
 
             result_text = response.text or ""
-            self.add_to_context("user", message.content)
-            self.add_to_context("assistant", result_text)
-
             token_usage = {}
             if response.usage_metadata:
                 token_usage = {
@@ -91,42 +79,14 @@ class GeminiAgent(BaseAgent):
                 agent_name=self.name,
                 content=result_text,
                 token_usage=token_usage,
-                metadata={
-                    "model": self.model_id,
-                    "source_message_id": message.id,
-                    "multimodal": bool(message.metadata.get("image_data") or message.metadata.get("audio_data")),
-                },
+                metadata={"model": self.model_id},
             )
         except Exception as e:
             return AgentResponse(
-                agent_name=self.name,
-                content="",
-                success=False,
-                error=str(e),
+                agent_name=self.name, content="", success=False, error=str(e),
             )
 
-    async def process_image(self, prompt: str, image_data: Any) -> AgentResponse:
-        """Process an image with a text prompt."""
-        msg = AgentMessage(
-            source="orchestrator",
-            target="gemini",
-            content=prompt,
-            metadata={"image_data": image_data},
-        )
-        return await self.send(msg)
-
-    async def process_audio(self, prompt: str, audio_data: Any) -> AgentResponse:
-        """Process audio with a text prompt."""
-        msg = AgentMessage(
-            source="orchestrator",
-            target="gemini",
-            content=prompt,
-            metadata={"audio_data": audio_data},
-        )
-        return await self.send(msg)
-
     async def health_check(self) -> bool:
-        """Check if the Gemini API is reachable."""
         try:
             client = self._get_client()
             response = await client.aio.models.generate_content(

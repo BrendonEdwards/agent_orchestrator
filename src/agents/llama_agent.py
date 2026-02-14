@@ -1,13 +1,12 @@
-"""Llama Local agent - the dogs body of the orchestrator.
+"""Llama agent - the dogs body. Grunt work via ollama.
 
-Llama via ollama handles the grunt work: simple, repetitive tasks that
-don't require complex reasoning. It's fast, free, local, and always
-available. The thinking agents (Claude, Codex, Gemini) delegate their
-menial subtasks here to conserve their own context and API costs.
+Stateless (obviously - it's doing grunt work, not thinking).
+No memento notes needed for simple tasks.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any
 
@@ -15,16 +14,10 @@ from src.agents.base import AgentCapability, AgentMessage, AgentResponse, BaseAg
 
 
 class LlamaAgent(BaseAgent):
-    """Llama agent for grunt work via ollama.
+    """Llama: grunt work via ollama. Formatting, boilerplate, simple tasks.
 
-    This is the dogs body - it handles simple tasks so the thinking
-    agents don't waste their context windows on:
-    - Formatting and cleanup
-    - Simple text extraction or transformation
-    - Boilerplate generation
-    - Data munging and conversion
-    - Repetitive batch operations
-    - Anything that needs doing but not thinking
+    Stateless and doesn't even need memento notes for most tasks.
+    Just give it a simple job and get a result.
     """
 
     def __init__(
@@ -47,7 +40,6 @@ class LlamaAgent(BaseAgent):
         self._client: Any = None
 
     def _get_client(self) -> Any:
-        """Get an OpenAI-compatible client pointing at ollama."""
         if self._client is None:
             import openai
 
@@ -58,66 +50,49 @@ class LlamaAgent(BaseAgent):
         return self._client
 
     async def send(self, message: AgentMessage) -> AgentResponse:
-        """Send a simple task to the local Llama instance."""
+        """Fresh call to ollama. No history, no context needed."""
         try:
             client = self._get_client()
 
-            messages = [
-                {
-                    "role": "system",
-                    "content": (
-                        "You do grunt work. Simple tasks, no overthinking. "
-                        "Be direct, output only what's asked for, nothing extra."
-                    ),
-                },
-                {"role": "user", "content": message.content},
-            ]
-
             response = await client.chat.completions.create(
                 model=self.model_id,
-                messages=messages,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Do the task. Output only what's asked for.",
+                    },
+                    {"role": "user", "content": message.content},
+                ],
                 max_completion_tokens=2048,
             )
 
-            result_text = response.choices[0].message.content or ""
-
             return AgentResponse(
                 agent_name=self.name,
-                content=result_text,
+                content=response.choices[0].message.content or "",
                 token_usage={
                     "input_tokens": response.usage.prompt_tokens if response.usage else 0,
                     "output_tokens": response.usage.completion_tokens if response.usage else 0,
                 },
-                metadata={
-                    "model": self.model_id,
-                    "source_message_id": message.id,
-                    "local": True,
-                },
+                metadata={"model": self.model_id, "local": True},
             )
         except Exception as e:
             return AgentResponse(
-                agent_name=self.name,
-                content="",
-                success=False,
-                error=str(e),
+                agent_name=self.name, content="", success=False, error=str(e),
             )
 
     async def do_grunt_work(self, task: str) -> str:
-        """Convenience method for simple fire-and-forget tasks."""
+        """Simple fire-and-forget task."""
         msg = AgentMessage(source="orchestrator", target="llama", content=task)
         resp = await self.send(msg)
         return resp.content if resp.success else ""
 
     async def batch(self, tasks: list[str]) -> list[str]:
-        """Run multiple simple tasks. Returns results in order."""
-        import asyncio
-
+        """Run multiple simple tasks in parallel."""
         msgs = [AgentMessage(source="orchestrator", target="llama", content=t) for t in tasks]
         responses = await asyncio.gather(*(self.send(m) for m in msgs))
         return [r.content if r.success else "" for r in responses]
 
     async def health_check(self) -> bool:
-        """Check if ollama is running."""
         try:
             client = self._get_client()
             response = await client.chat.completions.create(

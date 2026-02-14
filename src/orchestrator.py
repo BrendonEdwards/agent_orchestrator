@@ -133,7 +133,7 @@ class Orchestrator:
         if len(successful) == 1:
             final = successful[0].content
         else:
-            synthesis = await self.claude.synthesize(successful)
+            synthesis = await self.claude.synthesize(successful, memento=self.memento.briefing())
             final = synthesis.content
 
         self.memento.note("result", final[:150], priority=2)
