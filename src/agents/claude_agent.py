@@ -1,28 +1,25 @@
-"""Claude agent - the brain of the orchestrator.
+"""Claude agent - the brain. Runs via Claude Code CLI.
 
-Stateless. Every call is fresh. Memento notes are the only context.
+Uses your existing Claude Pro subscription. No API keys needed.
+Each call spawns: claude -p "prompt" --output-format text
 """
 
 from __future__ import annotations
 
-import os
-from typing import Any
+import asyncio
+import shutil
 
 from src.agents.base import AgentCapability, AgentMessage, AgentResponse, BaseAgent
 
 
 class ClaudeAgent(BaseAgent):
-    """Claude: task analysis, complex reasoning, synthesis.
+    """Claude via the Claude Code CLI.
 
-    Stateless - no conversation history. Gets memento survival notes
-    and the current task, nothing else.
+    Spawns `claude -p "prompt"` as a subprocess. Uses your Pro
+    subscription - no API key, no per-token billing.
     """
 
-    def __init__(
-        self,
-        model_id: str = "claude-sonnet-4-20250514",
-        api_key: str | None = None,
-    ):
+    def __init__(self, model_id: str = "claude-sonnet-4-20250514", cli_path: str | None = None):
         super().__init__(
             name="claude",
             model_id=model_id,
@@ -35,52 +32,47 @@ class ClaudeAgent(BaseAgent):
                 AgentCapability.SUMMARIZATION,
             ],
         )
-        self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
-        self._client: Any = None
-
-    def _get_client(self) -> Any:
-        if self._client is None:
-            import anthropic
-
-            self._client = anthropic.AsyncAnthropic(api_key=self._api_key)
-        return self._client
+        self._cli = cli_path or shutil.which("claude") or "claude"
 
     async def send(self, message: AgentMessage) -> AgentResponse:
-        """Fresh call to Claude. No history, just memento notes + task."""
+        """Spawn claude CLI, capture output."""
+        prompt = message.content
+        if message.memento:
+            prompt = f"[Survival notes: {message.memento}]\n\n{prompt}"
+
         try:
-            client = self._get_client()
-
-            system = (
-                "You are the brain of a multi-agent system. "
-                "You have no memory of previous interactions. "
-                "Your survival notes below are all you know about prior context."
+            proc = await asyncio.create_subprocess_exec(
+                self._cli, "-p", prompt,
+                "--output-format", "text",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-            if message.memento:
-                system += f"\n\nSurvival notes:\n{message.memento}"
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
 
-            response = await client.messages.create(
-                model=self.model_id,
-                max_tokens=4096,
-                system=system,
-                messages=[{"role": "user", "content": message.content}],
-            )
+            if proc.returncode != 0:
+                return AgentResponse(
+                    agent_name=self.name, content="",
+                    success=False, error=stderr.decode().strip(),
+                )
 
             return AgentResponse(
                 agent_name=self.name,
-                content=response.content[0].text,
-                token_usage={
-                    "input_tokens": response.usage.input_tokens,
-                    "output_tokens": response.usage.output_tokens,
-                },
-                metadata={"model": self.model_id},
+                content=stdout.decode().strip(),
+                metadata={"cli": self._cli, "model": self.model_id},
+            )
+        except asyncio.TimeoutError:
+            return AgentResponse(
+                agent_name=self.name, content="",
+                success=False, error="CLI timed out after 300s",
             )
         except Exception as e:
             return AgentResponse(
-                agent_name=self.name, content="", success=False, error=str(e),
+                agent_name=self.name, content="",
+                success=False, error=str(e),
             )
 
     async def synthesize(self, results: list[AgentResponse], memento: str = "") -> AgentResponse:
-        """Synthesize results from multiple agents. Fresh call."""
+        """Synthesize results from multiple agents."""
         parts = []
         for r in results:
             if r.success:
@@ -99,12 +91,13 @@ class ClaudeAgent(BaseAgent):
 
     async def health_check(self) -> bool:
         try:
-            client = self._get_client()
-            response = await client.messages.create(
-                model=self.model_id,
-                max_tokens=10,
-                messages=[{"role": "user", "content": "ping"}],
+            proc = await asyncio.create_subprocess_exec(
+                self._cli, "-p", "respond with ok",
+                "--output-format", "text",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-            return len(response.content) > 0
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+            return proc.returncode == 0 and len(stdout) > 0
         except Exception:
             return False

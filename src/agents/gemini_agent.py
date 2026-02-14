@@ -1,28 +1,26 @@
-"""Gemini agent - multimodal: language, imagery, sound.
+"""Gemini agent - multimodal. Runs via Gemini CLI.
 
-Stateless. Every call is fresh. Memento notes are the only context.
+Uses your existing Gemini Advanced subscription. No API keys needed.
+Install: npm install -g @anthropic-ai/claude-code  (or Google's gemini CLI)
+Each call spawns: gemini -p "prompt"
 """
 
 from __future__ import annotations
 
-import os
-from typing import Any
+import asyncio
+import shutil
 
 from src.agents.base import AgentCapability, AgentMessage, AgentResponse, BaseAgent
 
 
 class GeminiAgent(BaseAgent):
-    """Gemini: images, audio, cross-modal tasks.
+    """Gemini via the Gemini CLI.
 
-    Stateless - no conversation history. Gets memento survival notes
-    and the current task, nothing else.
+    Spawns `gemini` as a subprocess. Uses your existing subscription.
+    Install with: npm install -g @anthropic-ai/claude-code  (TODO: real gemini CLI)
     """
 
-    def __init__(
-        self,
-        model_id: str = "gemini-2.0-flash",
-        api_key: str | None = None,
-    ):
+    def __init__(self, model_id: str = "gemini-2.0-flash", cli_path: str | None = None):
         super().__init__(
             name="gemini",
             model_id=model_id,
@@ -34,65 +32,43 @@ class GeminiAgent(BaseAgent):
                 AgentCapability.TRANSLATION,
             ],
         )
-        self._api_key = api_key or os.environ.get("GOOGLE_API_KEY", "")
-        self._client: Any = None
-
-    def _get_client(self) -> Any:
-        if self._client is None:
-            from google import genai
-
-            self._client = genai.Client(api_key=self._api_key)
-        return self._client
+        self._cli = cli_path or shutil.which("gemini") or "gemini"
 
     async def send(self, message: AgentMessage) -> AgentResponse:
-        """Fresh call to Gemini. No history, just memento notes + task."""
+        """Spawn gemini CLI, capture output."""
+        prompt = message.content
+        if message.memento:
+            prompt = f"[Survival notes: {message.memento}]\n\n{prompt}"
+
         try:
-            client = self._get_client()
-
-            prompt = ""
-            if message.memento:
-                prompt = f"[Survival notes: {message.memento}]\n\n"
-            prompt += message.content
-
-            # Handle multimodal content
-            contents: list[Any] = []
-            if "image_data" in message.metadata:
-                contents.append(message.metadata["image_data"])
-            if "audio_data" in message.metadata:
-                contents.append(message.metadata["audio_data"])
-            contents.append(prompt)
-
-            response = await client.aio.models.generate_content(
-                model=self.model_id,
-                contents=contents,
+            proc = await asyncio.create_subprocess_exec(
+                self._cli, "-p", prompt,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
 
-            result_text = response.text or ""
-            token_usage = {}
-            if response.usage_metadata:
-                token_usage = {
-                    "input_tokens": response.usage_metadata.prompt_token_count or 0,
-                    "output_tokens": response.usage_metadata.candidates_token_count or 0,
-                }
+            if proc.returncode != 0:
+                return AgentResponse(
+                    agent_name=self.name, content="",
+                    success=False, error=stderr.decode().strip(),
+                )
 
             return AgentResponse(
                 agent_name=self.name,
-                content=result_text,
-                token_usage=token_usage,
-                metadata={"model": self.model_id},
+                content=stdout.decode().strip(),
+                metadata={"cli": self._cli, "model": self.model_id},
+            )
+        except asyncio.TimeoutError:
+            return AgentResponse(
+                agent_name=self.name, content="",
+                success=False, error="CLI timed out after 300s",
             )
         except Exception as e:
             return AgentResponse(
-                agent_name=self.name, content="", success=False, error=str(e),
+                agent_name=self.name, content="",
+                success=False, error=str(e),
             )
 
     async def health_check(self) -> bool:
-        try:
-            client = self._get_client()
-            response = await client.aio.models.generate_content(
-                model=self.model_id,
-                contents="ping",
-            )
-            return bool(response.text)
-        except Exception:
-            return False
+        return shutil.which(self._cli) is not None
