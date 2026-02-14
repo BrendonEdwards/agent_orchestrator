@@ -1,6 +1,6 @@
 # Agent Orchestrator
 
-Fractal multi-model AI agent swarm with cross-model QA. Uses your existing Pro subscriptions via their CLIs. No API keys needed (except Groq free tier for grunt work).
+Multi-model AI agent swarm with cross-model QA. Direct API calls - fast, structured errors, token tracking.
 
 ```bash
 python -m src "build me a web app with image upload"
@@ -8,130 +8,107 @@ python -m src "build me a web app with image upload"
 
 ## How it works
 
-Same pattern at every scale: **decompose, checklist, delegate, QA, synthesize**.
-
-Each agent is a CLI subprocess:
+Default mode: **shallow fan-out** (depth=1). Decompose once, delegate in parallel, QA, synthesize. Fast and practical.
 
 ```
 python orchestrator
     |
-    ├─> claude -p "decompose this task" --output-format text
-    |       (spawns Claude Code CLI, captures stdout)
+    ├─> Anthropic API  -> Claude decomposes task
     |
-    ├─> codex -q "implement the API endpoints"
-    |       (spawns Codex CLI, captures stdout)
+    ├─> OpenAI API     -> Codex implements code      (parallel)
+    ├─> Google API     -> Gemini processes images     (parallel)
+    ├─> Groq API       -> Llama formats boilerplate   (parallel)
     |
-    ├─> gemini -p "process these images"
-    |       (spawns Gemini CLI, captures stdout)
+    ├─> Cross-model QA (different model reviews each piece)
     |
-    └─> Groq API -> Llama (grunt work, free tier)
+    └─> Claude synthesizes final result
 ```
 
-The fractal with QA:
+Use `--deep` for full fractal recursion (depth=3):
 
 ```
     "build a web app with image upload"
                 |
         Orchestrator (d=0)
-        team: claude, codex, gemini, llama
                 |
-        Claude decomposes into 3 subtasks
-        Claude generates a checklist for each
+        Claude decomposes + generates checklists
                 |
     ┌───────────┼───────────┐
     |           |           |
-  "backend     "image      "HTML
-   API code"    processing"  templates"
+  "backend"  "images"    "templates"
     |           |           |
- Orch (d=1)  Orch (d=1)    Llama
- team:       team:         (grunt, no QA)
- 2x Codex    2x Gemini
- 1x Claude   1x Claude
- 1x Gemini   1x Codex
- 1x Llama    1x Llama
+  Codex       Gemini      Llama
+  does it     does it     (no QA)
     |           |
- Codex does  Gemini does
- the work    the work
+  Claude QAs  Codex QAs     <- DIFFERENT model reviews
+  score: 5/10 score: 8/10
     |           |
- Claude QAs  Codex QAs     <- DIFFERENT model reviews
- score: 5/10 score: 8/10
-    |           |
- FAIL!       PASS
- sent back   done
- w/ feedback
+  FAIL!       PASS
+  sent back
+  w/ feedback
     |
- Codex fixes
-    |
- Claude QAs
- score: 9/10
-    |
- PASS
+  Codex fixes -> Claude QAs -> 9/10 -> PASS
 ```
 
 ## Core Ideas
 
-**Fractal** - Self-similar at every scale. Decompose, delegate to sub-swarms, sub-swarms can decompose further. Stops when tasks are simple enough for one agent.
+**Shallow by default** - One level of decomposition + QA handles most tasks and finishes in seconds, not minutes.
 
-**Cross-model QA** - Every piece of work is reviewed by a DIFFERENT model type. Different models have different blind spots - that's the point.
+**Cross-model QA** - Every piece of work is reviewed by a DIFFERENT model type. Different models have different blind spots.
 
-**Checklist-driven** - Before work begins, Claude generates strict pass/fail criteria. Worker sees the checklist. Reviewer scores against it. Failed items get sent back.
+**Checklist-driven** - Claude generates strict pass/fail criteria before work begins. Reviewer scores against it.
 
-**CLI subprocesses** - Agents are CLI tools you already have installed. Each `send()` spawns a subprocess, captures stdout. Uses your Pro subscriptions, not API credits.
+**Direct API** - No CLI subprocess overhead. Direct HTTP to each provider. Structured errors, token tracking, ~2-5s per call.
 
-**Stateless + Memento** - Every agent call is a fresh subprocess. No context rot. Memento survival notes are the only context.
+**Stateless + Memento** - Every agent call is fresh. No context rot. Memento survival notes are the only context.
 
 ## Where compute runs
 
-**Nothing runs on your machine** except the orchestrator script itself. Each CLI subprocess talks to its provider's servers.
+All compute runs on provider servers. Your machine just orchestrates.
 
-| Agent | How it runs | Uses |
-|-------|-------------|------|
-| Claude | `claude -p "prompt" --output-format text` | Claude Pro subscription |
-| Codex | `codex -q "prompt"` | ChatGPT Plus/Pro subscription |
-| Gemini | `gemini -p "prompt"` | Gemini Advanced subscription |
-| Llama | Groq API (free tier) | Free Groq account |
-
-**No API keys needed for Claude, Codex, or Gemini** - the CLIs handle auth through your existing subscription login.
+| Agent | API | Cost |
+|-------|-----|------|
+| Claude | Anthropic Messages API | Pay-per-token |
+| Codex | OpenAI Chat API | Pay-per-token |
+| Gemini | Google GenAI API | Free tier available |
+| Llama | Groq API | Free tier |
 
 ## Setup
 
 ```bash
-# 1. Install the orchestrator
+# 1. Install
 pip install -e .
+pip install anthropic openai google-genai
 
-# 2. Install the CLIs (if not already)
-npm install -g @anthropic-ai/claude-code   # claude CLI
-npm install -g @openai/codex               # codex CLI
-npm install -g @anthropic-ai/claude-code   # gemini CLI (TODO: actual package)
+# 2. Set API keys
+export ANTHROPIC_API_KEY="sk-ant-..."    # console.anthropic.com
+export OPENAI_API_KEY="sk-..."           # platform.openai.com
+export GEMINI_API_KEY="AI..."            # aistudio.google.com (free)
+export GROQ_API_KEY="gsk_..."            # console.groq.com (free)
 
-# 3. Log into each CLI (one-time, uses your Pro subscriptions)
-claude login
-codex auth
-gemini auth
-
-# 4. Only API key needed: Groq for Llama grunt work (free tier)
-export GROQ_API_KEY="gsk_..."              # console.groq.com (free)
-
-# 5. Run it
+# 3. Run
 python -m src "build a REST API with auth and tests"
 ```
 
 ## CLI
 
 ```bash
-# Just say what you need
+# Default: shallow fan-out (fast, depth=1)
 python -m src "build a REST API for user management"
+
+# Deep mode: full fractal recursion (depth=3, thorough)
+python -m src "build a complete web app" --deep
 
 # Direct to a specific agent
 python -m src "write a binary search" --agent codex
 
-# Grunt work (straight to Llama on Groq, no QA)
+# Grunt work (Llama on Groq, no QA)
 python -m src "format this JSON: {a:1,b:2}" --grunt
 
-# Disable QA for speed
-python -m src "quick prototype of a login form" --no-qa
+# No QA (fastest)
+python -m src "quick prototype" --no-qa
 
-# Strict QA (higher threshold, more retries)
+# Strict QA
 python -m src "implement auth middleware" --qa-threshold 9 --qa-retries 4
 
 # Check what's alive
@@ -139,9 +116,6 @@ python -m src --health
 
 # See the team
 python -m src --team
-
-# See survival notes
-python -m src --notes
 ```
 
 ## Python API
@@ -151,25 +125,17 @@ import asyncio
 from src import Orchestrator
 
 async def main():
-    orch = Orchestrator(
-        qa_enabled=True,
-        qa_pass_score=7,
-        max_qa_retries=2,
-    )
-
-    # Complex task -> fractal decomposition + QA
+    # Default: shallow (depth=1), fast
+    orch = Orchestrator()
     result = await orch.run("Build a web app with image upload")
     print(result)
 
-    # Grunt work -> Llama on Groq (free), no QA
+    # Deep mode
+    deep = Orchestrator(max_depth=3)
+    result = await deep.run("Build a complete e-commerce platform")
+
+    # Grunt work -> Llama on Groq (free)
     await orch.grunt("sort alphabetically: zebra, apple, mango")
-
-    # Manual fractal spawn with custom team
-    child = orch.spawn(subtask="implement the image processing pipeline")
-    print(child.team)  # ['claude', 'gemini', 'gemini_2', 'codex', 'llama']
-
-    # Check survival notes (includes QA scores)
-    print(orch.notes())
 
 asyncio.run(main())
 ```
@@ -187,22 +153,31 @@ asyncio.run(main())
 
 ```
 src/
-├── __main__.py             # CLI - just say what you need
-├── orchestrator.py         # Fractal orchestrator + QA loop
+├── __main__.py             # CLI entry point
+├── orchestrator.py         # Orchestrator + QA loop
 ├── agents/
 │   ├── base.py             # Stateless agent interface
-│   ├── claude_agent.py     # Claude (subprocess: claude -p)
-│   ├── codex_agent.py      # Codex (subprocess: codex -q)
-│   ├── gemini_agent.py     # Gemini (subprocess: gemini -p)
+│   ├── claude_agent.py     # Claude (Anthropic API)
+│   ├── codex_agent.py      # Codex (OpenAI API)
+│   ├── gemini_agent.py     # Gemini (Google GenAI API)
 │   └── llama_agent.py      # Llama (Groq API, free tier)
 ├── memento/
 │   └── memento.py          # Anti-context-rot survival notes
 ├── routing/
 │   ├── router.py           # Inter-agent message routing
-│   └── protocol.py         # Compact wire format (not English)
+│   └── protocol.py         # Compact wire format
 └── rules/
     └── loader.py           # Rules.md parser
 ```
+
+## Shallow vs Deep
+
+| Mode | Flag | Depth | Speed | Best for |
+|------|------|-------|-------|----------|
+| Shallow | (default) | 1 | ~10-20s | Most tasks, prototyping |
+| Deep | `--deep` | 3 | ~60-120s | Complex multi-part projects |
+| Direct | `--agent X` | 0 | ~3-5s | Single-agent tasks |
+| Grunt | `--grunt` | 0 | ~1-2s | Formatting, boilerplate |
 
 ## License
 

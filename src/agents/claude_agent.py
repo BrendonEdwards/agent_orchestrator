@@ -1,25 +1,30 @@
-"""Claude agent - the brain. Runs via Claude Code CLI.
+"""Claude agent - the brain. Direct Anthropic API.
 
-Uses your existing Claude Pro subscription. No API keys needed.
-Each call spawns: claude -p "prompt" --output-format text
+Fast path: direct HTTP to api.anthropic.com, no CLI subprocess overhead.
+Requires: ANTHROPIC_API_KEY env var
+pip install anthropic
 """
 
 from __future__ import annotations
 
-import asyncio
-import shutil
+import os
+from typing import Any
 
 from src.agents.base import AgentCapability, AgentMessage, AgentResponse, BaseAgent
 
 
 class ClaudeAgent(BaseAgent):
-    """Claude via the Claude Code CLI.
+    """Claude via the Anthropic API.
 
-    Spawns `claude -p "prompt"` as a subprocess. Uses your Pro
-    subscription - no API key, no per-token billing.
+    Direct API call - no subprocess, no CLI bootstrap, structured errors.
     """
 
-    def __init__(self, model_id: str = "claude-sonnet-4-20250514", cli_path: str | None = None):
+    def __init__(
+        self,
+        model_id: str = "claude-sonnet-4-20250514",
+        api_key: str | None = None,
+        max_tokens: int = 4096,
+    ):
         super().__init__(
             name="claude",
             model_id=model_id,
@@ -32,38 +37,38 @@ class ClaudeAgent(BaseAgent):
                 AgentCapability.SUMMARIZATION,
             ],
         )
-        self._cli = cli_path or shutil.which("claude") or "claude"
+        self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        self._max_tokens = max_tokens
+        self._client: Any = None
+
+    def _get_client(self) -> Any:
+        if self._client is None:
+            import anthropic
+            self._client = anthropic.AsyncAnthropic(api_key=self._api_key)
+        return self._client
 
     async def send(self, message: AgentMessage) -> AgentResponse:
-        """Spawn claude CLI, capture output."""
+        """Direct API call to Anthropic."""
         prompt = message.content
         if message.memento:
             prompt = f"[Survival notes: {message.memento}]\n\n{prompt}"
 
         try:
-            proc = await asyncio.create_subprocess_exec(
-                self._cli, "-p", prompt,
-                "--output-format", "text",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            client = self._get_client()
+            response = await client.messages.create(
+                model=self.model_id,
+                max_tokens=self._max_tokens,
+                messages=[{"role": "user", "content": prompt}],
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
-
-            if proc.returncode != 0:
-                return AgentResponse(
-                    agent_name=self.name, content="",
-                    success=False, error=stderr.decode().strip(),
-                )
-
+            content = response.content[0].text if response.content else ""
             return AgentResponse(
                 agent_name=self.name,
-                content=stdout.decode().strip(),
-                metadata={"cli": self._cli, "model": self.model_id},
-            )
-        except asyncio.TimeoutError:
-            return AgentResponse(
-                agent_name=self.name, content="",
-                success=False, error="CLI timed out after 300s",
+                content=content,
+                token_usage={
+                    "input_tokens": response.usage.input_tokens,
+                    "output_tokens": response.usage.output_tokens,
+                },
+                metadata={"model": self.model_id},
             )
         except Exception as e:
             return AgentResponse(
@@ -91,13 +96,12 @@ class ClaudeAgent(BaseAgent):
 
     async def health_check(self) -> bool:
         try:
-            proc = await asyncio.create_subprocess_exec(
-                self._cli, "-p", "respond with ok",
-                "--output-format", "text",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            client = self._get_client()
+            response = await client.messages.create(
+                model=self.model_id,
+                max_tokens=10,
+                messages=[{"role": "user", "content": "respond with ok"}],
             )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
-            return proc.returncode == 0 and len(stdout) > 0
+            return len(response.content) > 0
         except Exception:
             return False

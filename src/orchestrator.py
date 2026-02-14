@@ -5,11 +5,14 @@ Each sub-swarm composes its own agent team. A different model type
 reviews every piece of work against a strict checklist. Work gets
 sent back if it doesn't pass.
 
-Agents run via CLI subprocesses - uses your existing Pro subscriptions:
-- Claude: `claude -p "prompt"` (Claude Pro subscription)
-- Codex: `codex -q "prompt"` (ChatGPT Plus subscription)
-- Gemini: `gemini -p "prompt"` (Gemini Advanced subscription)
-- Llama: Groq API (free tier, the one exception)
+Direct API calls - fast, no subprocess overhead, structured errors:
+- Claude: Anthropic API (ANTHROPIC_API_KEY)
+- Codex: OpenAI API (OPENAI_API_KEY)
+- Gemini: Google GenAI API (GEMINI_API_KEY, free tier available)
+- Llama: Groq API (GROQ_API_KEY, free tier)
+
+Default depth=1 (shallow fan-out). Decompose once, delegate, QA,
+synthesize. Use --max-depth for deeper recursion if needed.
 """
 
 from __future__ import annotations
@@ -117,12 +120,13 @@ class Orchestrator:
         self,
         rules_path: str | None = None,
         memento_path: str | None = None,
-        claude_cli: str | None = None,
-        codex_cli: str | None = None,
-        gemini_cli: str | None = None,
+        claude_model: str = "claude-sonnet-4-20250514",
+        codex_model: str = "o3-mini",
+        gemini_model: str = "gemini-2.0-flash",
+        llama_model: str = "llama-3.2-3b-preview",
         llama_provider: str = "groq",
         depth: int = 0,
-        max_depth: int = 10,
+        max_depth: int = 1,
         agents: dict[str, BaseAgent] | None = None,
         qa_enabled: bool = True,
         max_qa_retries: int = _MAX_QA_RETRIES,
@@ -137,9 +141,10 @@ class Orchestrator:
         # Config for spawning children
         self._config = {
             "rules_path": rules_path,
-            "claude_cli": claude_cli,
-            "codex_cli": codex_cli,
-            "gemini_cli": gemini_cli,
+            "claude_model": claude_model,
+            "codex_model": codex_model,
+            "gemini_model": gemini_model,
+            "llama_model": llama_model,
             "llama_provider": llama_provider,
         }
 
@@ -154,7 +159,7 @@ class Orchestrator:
             self._agents = self._build_default_team()
 
         # Always need a claude reference for decomposition/synthesis/checklist
-        self._claude = self._find_agent(ClaudeAgent) or ClaudeAgent(cli_path=claude_cli)
+        self._claude = self._find_agent(ClaudeAgent) or ClaudeAgent(model_id=claude_model)
         self._llama = self._find_agent(LlamaAgent)
 
         self.router = MessageRouter(
@@ -166,10 +171,13 @@ class Orchestrator:
     def _build_default_team(self) -> dict[str, BaseAgent]:
         """Default team: one of each."""
         return {
-            "claude": ClaudeAgent(cli_path=self._config["claude_cli"]),
-            "codex": CodexAgent(cli_path=self._config["codex_cli"]),
-            "gemini": GeminiAgent(cli_path=self._config["gemini_cli"]),
-            "llama": LlamaAgent(provider=self._config["llama_provider"]),
+            "claude": ClaudeAgent(model_id=self._config["claude_model"]),
+            "codex": CodexAgent(model_id=self._config["codex_model"]),
+            "gemini": GeminiAgent(model_id=self._config["gemini_model"]),
+            "llama": LlamaAgent(
+                model_id=self._config["llama_model"],
+                provider=self._config["llama_provider"],
+            ),
         }
 
     def _find_agent(self, agent_type: type) -> BaseAgent | None:
@@ -189,22 +197,24 @@ class Orchestrator:
             scores[agent_name] = score
 
         team: dict[str, BaseAgent] = {
-            "claude": ClaudeAgent(cli_path=self._config["claude_cli"]),
-            "llama": LlamaAgent(provider=self._config["llama_provider"]),
+            "claude": ClaudeAgent(model_id=self._config["claude_model"]),
+            "llama": LlamaAgent(
+                model_id=self._config["llama_model"],
+                provider=self._config["llama_provider"],
+            ),
         }
 
         best = max(scores, key=scores.get)  # type: ignore[arg-type]
         best_score = scores[best]
 
-        team["codex"] = CodexAgent(cli_path=self._config["codex_cli"])
-        team["gemini"] = GeminiAgent(cli_path=self._config["gemini_cli"])
+        team["codex"] = CodexAgent(model_id=self._config["codex_model"])
+        team["gemini"] = GeminiAgent(model_id=self._config["gemini_model"])
 
         if best_score >= 2 and best not in ("claude", "llama"):
             for i in range(min(best_score - 1, 3)):
-                if best == "codex":
-                    team[f"{best}_{i + 2}"] = CodexAgent(cli_path=self._config["codex_cli"])
-                else:
-                    team[f"{best}_{i + 2}"] = GeminiAgent(cli_path=self._config["gemini_cli"])
+                agent_class = CodexAgent if best == "codex" else GeminiAgent
+                model = self._config[f"{best}_model"]
+                team[f"{best}_{i + 2}"] = agent_class(model_id=model)
 
         return team
 
@@ -269,11 +279,11 @@ class Orchestrator:
 
         # Reviewer type not in team - create ephemeral one
         if reviewer_name == "claude":
-            return ClaudeAgent(cli_path=self._config["claude_cli"])
+            return ClaudeAgent(model_id=self._config["claude_model"])
         elif reviewer_name == "codex":
-            return CodexAgent(cli_path=self._config["codex_cli"])
+            return CodexAgent(model_id=self._config["codex_model"])
         elif reviewer_name == "gemini":
-            return GeminiAgent(cli_path=self._config["gemini_cli"])
+            return GeminiAgent(model_id=self._config["gemini_model"])
         return None
 
     async def _qa_review(

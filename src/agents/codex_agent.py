@@ -1,26 +1,30 @@
-"""Codex agent - code generation. Runs via OpenAI Codex CLI.
+"""Codex agent - code generation. Direct OpenAI API.
 
-Uses your existing ChatGPT Plus/Pro subscription. No API keys needed.
-Install: npm install -g @openai/codex
-Each call spawns: codex -q "prompt"
+Fast path: direct HTTP to api.openai.com, no CLI subprocess overhead.
+Requires: OPENAI_API_KEY env var
+pip install openai
 """
 
 from __future__ import annotations
 
-import asyncio
-import shutil
+import os
+from typing import Any
 
 from src.agents.base import AgentCapability, AgentMessage, AgentResponse, BaseAgent
 
 
 class CodexAgent(BaseAgent):
-    """Codex via the OpenAI Codex CLI.
+    """Codex via the OpenAI API.
 
-    Spawns `codex` as a subprocess. Uses your existing subscription.
-    Install with: npm install -g @openai/codex
+    Direct API call - no subprocess, structured errors, token tracking.
     """
 
-    def __init__(self, model_id: str = "o3-mini", cli_path: str | None = None):
+    def __init__(
+        self,
+        model_id: str = "o3-mini",
+        api_key: str | None = None,
+        max_tokens: int = 4096,
+    ):
         super().__init__(
             name="codex",
             model_id=model_id,
@@ -32,37 +36,41 @@ class CodexAgent(BaseAgent):
                 AgentCapability.MATH,
             ],
         )
-        self._cli = cli_path or shutil.which("codex") or "codex"
+        self._api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
+        self._max_tokens = max_tokens
+        self._client: Any = None
+
+    def _get_client(self) -> Any:
+        if self._client is None:
+            import openai
+            self._client = openai.AsyncOpenAI(api_key=self._api_key)
+        return self._client
 
     async def send(self, message: AgentMessage) -> AgentResponse:
-        """Spawn codex CLI, capture output."""
+        """Direct API call to OpenAI."""
         prompt = message.content
         if message.memento:
             prompt = f"[Survival notes: {message.memento}]\n\n{prompt}"
 
         try:
-            proc = await asyncio.create_subprocess_exec(
-                self._cli, "-q", prompt,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            client = self._get_client()
+            response = await client.chat.completions.create(
+                model=self.model_id,
+                messages=[
+                    {"role": "system", "content": "You are a code-focused AI. Be precise and concise."},
+                    {"role": "user", "content": prompt},
+                ],
+                max_completion_tokens=self._max_tokens,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
-
-            if proc.returncode != 0:
-                return AgentResponse(
-                    agent_name=self.name, content="",
-                    success=False, error=stderr.decode().strip(),
-                )
-
+            content = response.choices[0].message.content or ""
             return AgentResponse(
                 agent_name=self.name,
-                content=stdout.decode().strip(),
-                metadata={"cli": self._cli, "model": self.model_id},
-            )
-        except asyncio.TimeoutError:
-            return AgentResponse(
-                agent_name=self.name, content="",
-                success=False, error="CLI timed out after 300s",
+                content=content,
+                token_usage={
+                    "input_tokens": response.usage.prompt_tokens if response.usage else 0,
+                    "output_tokens": response.usage.completion_tokens if response.usage else 0,
+                },
+                metadata={"model": self.model_id},
             )
         except Exception as e:
             return AgentResponse(
@@ -71,4 +79,13 @@ class CodexAgent(BaseAgent):
             )
 
     async def health_check(self) -> bool:
-        return shutil.which(self._cli) is not None
+        try:
+            client = self._get_client()
+            response = await client.chat.completions.create(
+                model=self.model_id,
+                messages=[{"role": "user", "content": "1"}],
+                max_completion_tokens=5,
+            )
+            return len(response.choices) > 0
+        except Exception:
+            return False
