@@ -10,11 +10,18 @@ Agents run via CLI subprocesses - uses your existing Pro subscriptions:
 - Codex: `codex -q "prompt"` (ChatGPT Plus subscription)
 - Gemini: `gemini -p "prompt"` (Gemini Advanced subscription)
 - Llama: Groq API (free tier, the one exception)
+
+Routing uses CAPABILITIES not model names. Claude judges what a task
+needs (REASONING, CODE, MULTIMODAL, FAST), then a static config table
+maps capability -> provider. When a better model drops, update the
+table - not the orchestration logic. The reasoning model doesn't need
+to know what models exist; it just needs to judge the task's nature.
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 
 from src.agents.base import AgentMessage, AgentResponse, BaseAgent
@@ -28,31 +35,37 @@ from src.rules.loader import RulesLoader
 from src.tracker import SwarmTracker
 
 
+# ── Capability-based routing ─────────────────────────────────────
+#
+# The orchestrator never picks models. It picks CAPABILITIES.
+# Claude judges "this task needs deep reasoning" or "this is code gen".
+# This table maps that judgment to a provider. Update this when
+# better models drop - the orchestration logic never changes.
+
+CAPABILITY_PROVIDERS: dict[str, str] = {
+    "REASONING":   "claude",   # Deep analysis, planning, proofs, architecture
+    "CODE":        "codex",    # Code generation, debugging, refactoring, tests
+    "MULTIMODAL":  "gemini",   # Images, audio, video, diagrams
+    "FAST":        "llama",    # Trivial/grunt work, formatting, boilerplate
+}
+
+# Which capabilities can QA which. Different model = different blind spots.
+# The reviewer must be a different CAPABILITY than the worker.
+_QA_CAPABILITY_PAIRINGS: dict[str, str] = {
+    "REASONING":   "CODE",       # Reasoning work reviewed by code-focused model
+    "CODE":        "REASONING",  # Code work reviewed by reasoning-focused model
+    "MULTIMODAL":  "REASONING",  # Multimodal work reviewed by reasoning model
+    "FAST":        "",           # Grunt work doesn't need QA
+}
+
 # Simple tasks that should go to Llama
 _GRUNT_KEYWORDS = [
     "format", "convert", "list", "sort", "extract", "template",
     "boilerplate", "rename", "reorder", "cleanup", "prettify",
 ]
 
-# Keywords that signal which agent type a subtask needs
-_AGENT_SIGNALS = {
-    "codex": ["code", "program", "function", "implement", "debug", "algorithm",
-              "class", "module", "api", "endpoint", "test", "refactor"],
-    "gemini": ["image", "picture", "photo", "audio", "sound", "video",
-               "visual", "diagram", "describe image", "transcribe"],
-    "llama": ["format", "convert", "sort", "list", "template", "boilerplate",
-              "cleanup", "extract", "rename"],
-    "claude": ["design", "architect", "plan", "analyze", "review", "explain",
-               "reason", "compare", "evaluate", "synthesize"],
-}
-
-# Cross-model QA pairings: worker -> reviewer (different model = different blind spots)
-_QA_PAIRINGS = {
-    "claude": "codex",    # Claude's work reviewed by Codex
-    "codex": "claude",    # Codex's work reviewed by Claude
-    "gemini": "claude",   # Gemini's work reviewed by Claude
-    "llama": None,        # Grunt work doesn't need QA
-}
+# Valid capabilities Claude can assign
+_VALID_CAPABILITIES = frozenset(CAPABILITY_PROVIDERS.keys())
 
 # Max times work can be sent back before accepting
 _MAX_QA_RETRIES = 2
@@ -182,34 +195,22 @@ class Orchestrator:
                 return agent
         return None
 
-    def _build_team_for(self, subtask: str) -> dict[str, BaseAgent]:
-        """Build a custom agent team weighted for a specific subtask."""
-        task_lower = subtask.lower()
+    def _resolve_provider(self, capability: str) -> str:
+        """Map a capability tag to a provider name via the config table."""
+        cap = capability.upper()
+        if cap in CAPABILITY_PROVIDERS:
+            return CAPABILITY_PROVIDERS[cap]
+        return CAPABILITY_PROVIDERS["REASONING"]  # Default: reasoning model
 
-        scores = {}
-        for agent_name, keywords in _AGENT_SIGNALS.items():
-            score = sum(1 for kw in keywords if kw in task_lower)
-            scores[agent_name] = score
-
-        team: dict[str, BaseAgent] = {
+    def _build_team_for(self, subtask: str, capability: str = "") -> dict[str, BaseAgent]:
+        """Build an agent team. Always includes all providers - the
+        capability just determines who does the primary work."""
+        return {
             "claude": ClaudeAgent(cli_path=self._config["claude_cli"]),
+            "codex": CodexAgent(cli_path=self._config["codex_cli"]),
+            "gemini": GeminiAgent(cli_path=self._config["gemini_cli"]),
             "llama": LlamaAgent(provider=self._config["llama_provider"]),
         }
-
-        best = max(scores, key=scores.get)  # type: ignore[arg-type]
-        best_score = scores[best]
-
-        team["codex"] = CodexAgent(cli_path=self._config["codex_cli"])
-        team["gemini"] = GeminiAgent(cli_path=self._config["gemini_cli"])
-
-        if best_score >= 2 and best not in ("claude", "llama"):
-            for i in range(min(best_score - 1, 3)):
-                if best == "codex":
-                    team[f"{best}_{i + 2}"] = CodexAgent(cli_path=self._config["codex_cli"])
-                else:
-                    team[f"{best}_{i + 2}"] = GeminiAgent(cli_path=self._config["gemini_cli"])
-
-        return team
 
     # ── Tracked agent calls ─────────────────────────────────────────
 
@@ -308,30 +309,43 @@ class Orchestrator:
 
     # ── Cross-model QA ──────────────────────────────────────────────
 
-    def _pick_reviewer(self, worker_name: str) -> BaseAgent | None:
-        """Pick a reviewer that's a DIFFERENT model type than the worker.
+    def _pick_reviewer(self, worker_name: str, worker_capability: str = "") -> BaseAgent | None:
+        """Pick a reviewer that's a DIFFERENT provider than the worker.
 
-        Different models have different blind spots. Claude won't catch
-        what another Claude would miss. But Codex might.
+        Uses capability-based pairings: the reviewer's capability is
+        looked up from _QA_CAPABILITY_PAIRINGS, then resolved to a
+        provider. Falls back to provider-name pairing if no capability given.
         """
-        # Normalize: codex_2, codex_3 etc. -> codex
-        base_name = worker_name.split("_")[0]
-        reviewer_name = _QA_PAIRINGS.get(base_name)
+        # If we know the worker's capability, use capability-based pairing
+        if worker_capability:
+            reviewer_cap = _QA_CAPABILITY_PAIRINGS.get(worker_capability.upper(), "")
+            if not reviewer_cap:
+                return None  # e.g. FAST -> no QA
+            reviewer_provider = self._resolve_provider(reviewer_cap)
+        else:
+            # Fallback: resolve by provider name
+            base_name = worker_name.split("_")[0]
+            # Reverse-lookup: what capability does this provider serve?
+            worker_cap = ""
+            for cap, prov in CAPABILITY_PROVIDERS.items():
+                if prov == base_name:
+                    worker_cap = cap
+                    break
+            reviewer_cap = _QA_CAPABILITY_PAIRINGS.get(worker_cap, "")
+            if not reviewer_cap:
+                return None
+            reviewer_provider = self._resolve_provider(reviewer_cap)
 
-        if not reviewer_name:
-            return None
+        # Find the reviewer in our team
+        if reviewer_provider in self._agents:
+            return self._agents[reviewer_provider]
 
-        # Find the reviewer in our team, or create one
-        for name, agent in self._agents.items():
-            if name.split("_")[0] == reviewer_name:
-                return agent
-
-        # Reviewer type not in team - create ephemeral one
-        if reviewer_name == "claude":
+        # Create ephemeral one
+        if reviewer_provider == "claude":
             return ClaudeAgent(cli_path=self._config["claude_cli"])
-        elif reviewer_name == "codex":
+        elif reviewer_provider == "codex":
             return CodexAgent(cli_path=self._config["codex_cli"])
-        elif reviewer_name == "gemini":
+        elif reviewer_provider == "gemini":
             return GeminiAgent(cli_path=self._config["gemini_cli"])
         return None
 
