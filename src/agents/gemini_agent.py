@@ -1,7 +1,6 @@
-"""Gemini agent - multimodal. Runs via Gemini CLI.
+"""Gemini agent - multimodal + grunt work. Runs via Gemini CLI.
 
 Uses your existing Gemini Advanced subscription. No API keys needed.
-Install: npm install -g @anthropic-ai/claude-code  (or Google's gemini CLI)
 Each call spawns: gemini -p "prompt"
 """
 
@@ -17,7 +16,7 @@ class GeminiAgent(BaseAgent):
     """Gemini via the Gemini CLI.
 
     Spawns `gemini` as a subprocess. Uses your existing subscription.
-    Install with: npm install -g @anthropic-ai/claude-code  (TODO: real gemini CLI)
+    Handles both MULTIMODAL and FAST capabilities.
     """
 
     def __init__(self, model_id: str = "gemini-2.0-flash", cli_path: str | None = None):

@@ -5,11 +5,12 @@ Each sub-swarm composes its own agent team. A different model type
 reviews every piece of work against a strict checklist. Work gets
 sent back if it doesn't pass.
 
-Agents run via CLI subprocesses - uses your existing Pro subscriptions:
+All agents run via CLI subprocesses - uses your existing Pro subscriptions:
 - Claude: `claude -p "prompt"` (Claude Pro subscription)
 - Codex: `codex -q "prompt"` (ChatGPT Plus subscription)
 - Gemini: `gemini -p "prompt"` (Gemini Advanced subscription)
-- Llama: Groq API (free tier, the one exception)
+
+No API keys needed. Gemini handles both multimodal and grunt work.
 
 Routing uses CAPABILITIES not model names. Claude judges what a task
 needs (REASONING, CODE, MULTIMODAL, FAST), then a static config table
@@ -28,7 +29,6 @@ from src.agents.base import AgentMessage, AgentResponse, BaseAgent
 from src.agents.claude_agent import ClaudeAgent
 from src.agents.codex_agent import CodexAgent
 from src.agents.gemini_agent import GeminiAgent
-from src.agents.llama_agent import LlamaAgent
 from src.memento.memento import Memento
 from src.routing.router import MessageRouter
 from src.rules.loader import RulesLoader
@@ -46,7 +46,7 @@ CAPABILITY_PROVIDERS: dict[str, str] = {
     "REASONING":   "claude",   # Deep analysis, planning, proofs, architecture
     "CODE":        "codex",    # Code generation, debugging, refactoring, tests
     "MULTIMODAL":  "gemini",   # Images, audio, video, diagrams
-    "FAST":        "llama",    # Trivial/grunt work, formatting, boilerplate
+    "FAST":        "gemini",   # Trivial/grunt work, formatting, boilerplate
 }
 
 # Which capabilities can QA which. Different model = different blind spots.
@@ -58,7 +58,7 @@ _QA_CAPABILITY_PAIRINGS: dict[str, str] = {
     "FAST":        "",           # Grunt work doesn't need QA
 }
 
-# Simple tasks that should go to Llama
+# Simple tasks that should go to Gemini (fast, no QA)
 _GRUNT_KEYWORDS = [
     "format", "convert", "list", "sort", "extract", "template",
     "boilerplate", "rename", "reorder", "cleanup", "prettify",
@@ -115,7 +115,7 @@ class Orchestrator:
             |       |          |
          code     images    boilerplate
             |       |          |
-        Codex     Gemini      Llama
+        Codex     Gemini      Gemini
         does it   does it     (no QA)
             |       |
         Claude    Codex       <- different model reviews
@@ -134,7 +134,6 @@ class Orchestrator:
         claude_cli: str | None = None,
         codex_cli: str | None = None,
         gemini_cli: str | None = None,
-        llama_provider: str = "groq",
         depth: int = 0,
         max_depth: int = 10,
         agents: dict[str, BaseAgent] | None = None,
@@ -156,7 +155,6 @@ class Orchestrator:
             "claude_cli": claude_cli,
             "codex_cli": codex_cli,
             "gemini_cli": gemini_cli,
-            "llama_provider": llama_provider,
         }
 
         self.memento = Memento(persist_path=memento_path)
@@ -171,7 +169,7 @@ class Orchestrator:
 
         # Always need a claude reference for decomposition/synthesis/checklist
         self._claude = self._find_agent(ClaudeAgent) or ClaudeAgent(cli_path=claude_cli)
-        self._llama = self._find_agent(LlamaAgent)
+        self._gemini = self._find_agent(GeminiAgent)
 
         self.router = MessageRouter(
             agents=self._agents,
@@ -180,12 +178,11 @@ class Orchestrator:
         )
 
     def _build_default_team(self) -> dict[str, BaseAgent]:
-        """Default team: one of each."""
+        """Default team: three CLI agents."""
         return {
             "claude": ClaudeAgent(cli_path=self._config["claude_cli"]),
             "codex": CodexAgent(cli_path=self._config["codex_cli"]),
             "gemini": GeminiAgent(cli_path=self._config["gemini_cli"]),
-            "llama": LlamaAgent(provider=self._config["llama_provider"]),
         }
 
     def _find_agent(self, agent_type: type) -> BaseAgent | None:
@@ -209,7 +206,6 @@ class Orchestrator:
             "claude": ClaudeAgent(cli_path=self._config["claude_cli"]),
             "codex": CodexAgent(cli_path=self._config["codex_cli"]),
             "gemini": GeminiAgent(cli_path=self._config["gemini_cli"]),
-            "llama": LlamaAgent(provider=self._config["llama_provider"]),
         }
 
     # ── Tracked agent calls ─────────────────────────────────────────
@@ -476,7 +472,7 @@ class Orchestrator:
     async def run(self, task: str, capability: str = "") -> str:
         """Run a task. Fractal + QA at every scale.
 
-        1. Grunt work? -> Llama (no QA)
+        1. Grunt work? -> Gemini (no QA)
         2. Simple? -> agent does it, different model QAs it
         3. Complex? -> decompose, spawn sub-swarms, each gets QA'd
         4. Failed QA? -> work goes back with feedback, retry
@@ -501,13 +497,13 @@ class Orchestrator:
         return await self._run_single_with_qa(leaf_task, leaf_cap)
 
     async def _do_grunt(self, task: str) -> str:
-        """Grunt work -> Llama, no QA."""
-        self.memento.note("route", "llama:grunt", priority=1)
+        """Grunt work -> Gemini, no QA."""
+        self.memento.note("route", "gemini:grunt", priority=1)
         if self.tracker:
-            self.tracker.event(self.depth, "routed to llama (grunt work)")
-        if self._llama:
-            msg = AgentMessage(source="orchestrator", target="llama", content=task)
-            response = await self._tracked_send(self._llama, msg, label="grunt")
+            self.tracker.event(self.depth, "routed to gemini (grunt work)")
+        if self._gemini:
+            msg = AgentMessage(source="orchestrator", target="gemini", content=task)
+            response = await self._tracked_send(self._gemini, msg, label="grunt")
             if response.success:
                 self.memento.note("done", response.content[:150], priority=2)
                 return response.content
@@ -825,10 +821,10 @@ class Orchestrator:
         return await self._tracked_route(msg, label="direct")
 
     async def grunt(self, task: str) -> str:
-        """Grunt work -> Llama."""
-        if self._llama:
-            msg = AgentMessage(source="orchestrator", target="llama", content=task)
-            resp = await self._tracked_send(self._llama, msg, label="grunt")
+        """Grunt work -> Gemini."""
+        if self._gemini:
+            msg = AgentMessage(source="orchestrator", target="gemini", content=task)
+            resp = await self._tracked_send(self._gemini, msg, label="grunt")
             return resp.content if resp.success else ""
         return ""
 

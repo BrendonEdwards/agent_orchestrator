@@ -2,7 +2,7 @@
 
 A fractal multi-model AI agent swarm with cross-model quality assurance.
 
-Uses your existing Pro subscriptions (Claude, ChatGPT, Gemini) via their CLIs - no API keys needed. Llama runs on Groq's free tier for grunt work.
+Uses your existing Pro subscriptions (Claude, ChatGPT, Gemini) via their CLIs. No API keys needed.
 
 ```
               "build a web app with image upload"
@@ -15,7 +15,7 @@ Uses your existing Pro subscriptions (Claude, ChatGPT, Gemini) via their CLIs - 
           [CODE]       [MULTIMODAL]     [FAST]
          "API code"   "image pipeline"  "HTML templates"
                 |           |              |
-             Codex       Gemini          Llama
+             Codex       Gemini          Gemini
             (works)      (works)       (no QA needed)
                 |           |
              Claude      Codex           <- different model reviews
@@ -52,13 +52,13 @@ CAPABILITY_PROVIDERS = {
     "REASONING":  "claude",    # Deep analysis, planning, architecture
     "CODE":       "codex",     # Code generation, debugging, refactoring
     "MULTIMODAL": "gemini",    # Images, audio, video, diagrams
-    "FAST":       "llama",     # Formatting, boilerplate, grunt work
+    "FAST":       "gemini",    # Formatting, boilerplate, grunt work
 }
 ```
 
 **Stateless agents + memento memory.** Every agent call is a fresh subprocess. No conversation history. No context rot. Instead, a compact "memento" system injects survival notes into every call - goals, constraints, QA scores, parent context. Fresh agent + concise notes beats stale agent + full context.
 
-**CLI subprocesses, not API calls.** Claude, Codex, and Gemini run as CLI tools you already have installed. Each `send()` spawns a subprocess, captures stdout. Uses your existing Pro subscriptions. The only API key needed is Groq (free tier) for Llama grunt work.
+**CLI subprocesses, not API calls.** Claude, Codex, and Gemini run as CLI tools you already have installed. Each `send()` spawns a subprocess, captures stdout. Uses your existing Pro subscriptions. No API keys needed.
 
 **Cross-model QA pairings.** Workers are reviewed by a model with different strengths:
 
@@ -67,22 +67,24 @@ CAPABILITY_PROVIDERS = {
 | REASONING (Claude) | CODE (Codex) | Catches logical gaps Claude rationalizes past |
 | CODE (Codex) | REASONING (Claude) | Catches architectural issues Codex ignores |
 | MULTIMODAL (Gemini) | REASONING (Claude) | Validates multimodal output descriptions |
-| FAST (Llama) | None | Grunt work - not worth QA cost |
+| FAST (Gemini) | None | Grunt work - not worth QA cost |
 
 ## Setup
 
 ### Prerequisites
 
-Python 3.10+ and the CLI tools for whichever models you want to use:
+Python 3.10+ and the CLI tools:
 
 ```bash
 # Install CLIs
 npm install -g @anthropic-ai/claude-code   # Claude
 npm install -g @openai/codex               # Codex
+# Gemini CLI - install per Google's instructions
 
 # Authenticate (one-time, uses your Pro subscriptions)
 claude login
 codex auth
+gemini auth
 ```
 
 ### Install
@@ -91,10 +93,6 @@ codex auth
 git clone https://github.com/BrendonEdwards/agent_orchestrator.git
 cd agent_orchestrator
 pip install -e .
-
-# For Llama grunt work (free tier):
-# Get a key from https://console.groq.com
-export GROQ_API_KEY="your-key-here"
 ```
 
 ### Optional
@@ -102,9 +100,6 @@ export GROQ_API_KEY="your-key-here"
 ```bash
 # Dev tools (pytest, ruff)
 pip install -e ".[dev]"
-
-# Local Llama inference instead of Groq
-pip install -e ".[llama]"
 ```
 
 ## Usage
@@ -118,7 +113,7 @@ python -m src "build a REST API for user management"
 # Direct to a specific agent (no decomposition, no QA)
 python -m src "write a binary search" --agent codex
 
-# Grunt work -> Llama on Groq (free, no QA)
+# Grunt work -> Gemini (fast, no QA)
 python -m src "format this JSON: {a:1,b:2}" --grunt
 
 # Disable QA for speed
@@ -151,7 +146,7 @@ async def main():
     result = await orch.run("Build a web app with image upload")
     print(result)
 
-    # Grunt work -> Llama (free), no QA
+    # Grunt work -> Gemini (fast, no QA)
     await orch.grunt("sort alphabetically: zebra, apple, mango")
 
     # Direct agent send
@@ -239,7 +234,7 @@ src/
 │   ├── claude_agent.py     # Claude  (subprocess: claude -p)
 │   ├── codex_agent.py      # Codex   (subprocess: codex -q)
 │   ├── gemini_agent.py     # Gemini  (subprocess: gemini -p)
-│   └── llama_agent.py      # Llama   (Groq API, free tier)
+│   └── llama_agent.py      # Llama   (optional, Groq API)
 ├── memento/
 │   └── memento.py          # Anti-context-rot survival notes
 ├── routing/
@@ -283,12 +278,9 @@ Protocol: T:codegen|L:py|N:sum_evens|I:list[int]|O:int|D:sum even vals
 
 ### Environment Variables
 
-| Variable | Required | Purpose |
-|----------|----------|---------|
-| `GROQ_API_KEY` | For Llama | Groq API key ([free tier](https://console.groq.com)) |
-| `TOGETHER_API_KEY` | No | Alternative Llama provider via Together AI |
+No environment variables required. All three agents (Claude, Codex, Gemini) authenticate through their own CLI login mechanisms.
 
-CLI tools (Claude, Codex, Gemini) authenticate through their own login mechanisms - no API keys needed.
+If you want to use the optional Llama agent via Groq, set `GROQ_API_KEY`.
 
 ### Rules File
 
@@ -299,7 +291,7 @@ CLI tools (Claude, Codex, Gemini) authenticate through their own login mechanism
 | Flag | Default | Purpose |
 |------|---------|---------|
 | `--agent NAME` | - | Send directly to a specific agent |
-| `--grunt` | - | Force Llama (no QA) |
+| `--grunt` | - | Force Gemini for grunt work (no QA) |
 | `--no-qa` | - | Disable QA for speed |
 | `--qa-threshold N` | `7` | QA pass score (1-10) |
 | `--qa-retries N` | `2` | Max QA retry attempts |
@@ -321,15 +313,15 @@ CAPABILITY_PROVIDERS = {
     "REASONING":  "codex",     # <- changed from "claude"
     "CODE":       "codex",
     "MULTIMODAL": "gemini",
-    "FAST":       "llama",
+    "FAST":       "gemini",
 }
 
-# Hypothetical: Gemini gets great at code
+# Hypothetical: Claude gets great at code too
 CAPABILITY_PROVIDERS = {
     "REASONING":  "claude",
-    "CODE":       "gemini",    # <- changed from "codex"
+    "CODE":       "claude",    # <- changed from "codex"
     "MULTIMODAL": "gemini",
-    "FAST":       "llama",
+    "FAST":       "gemini",
 }
 ```
 

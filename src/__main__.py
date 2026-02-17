@@ -29,12 +29,12 @@ def main() -> None:
     )
     parser.add_argument(
         "--agent", "-a",
-        help="Send directly to a specific agent (claude, codex, gemini, llama)",
+        help="Send directly to a specific agent (claude, codex, gemini)",
     )
     parser.add_argument(
         "--grunt", "-g",
         action="store_true",
-        help="Force task to Llama (grunt work, no QA)",
+        help="Force task to Gemini (grunt work, no QA)",
     )
     parser.add_argument(
         "--health",

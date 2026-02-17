@@ -89,15 +89,15 @@ class MessageRouter:
         return await self.route(msg)
 
     async def delegate_grunt_work(self, task: str) -> AgentResponse:
-        """Send simple work to Llama. No memento needed."""
-        target = self._agents.get("llama")
+        """Send simple work to Gemini. No memento needed."""
+        target = self._agents.get("gemini")
         if not target:
             return AgentResponse(
-                agent_name="llama", content="", success=False,
-                error="Llama agent not available",
+                agent_name="gemini", content="", success=False,
+                error="Gemini agent not available",
             )
         # Grunt work goes direct - no memento, no context, just the task
-        msg = AgentMessage(source="orchestrator", target="llama", content=task)
+        msg = AgentMessage(source="orchestrator", target="gemini", content=task)
         return await target.send(msg)
 
     async def broadcast(
