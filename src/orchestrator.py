@@ -355,12 +355,13 @@ class Orchestrator:
         work: str,
         checklist: list[str],
         worker_name: str,
+        worker_capability: str = "",
     ) -> QAResult:
         """A different model reviews work against the checklist.
 
         Returns pass/fail, score, and specific feedback per checklist item.
         """
-        reviewer = self._pick_reviewer(worker_name)
+        reviewer = self._pick_reviewer(worker_name, worker_capability)
         if not reviewer:
             return QAResult(
                 passed=True, score=10, feedback="No QA reviewer available",
@@ -472,7 +473,7 @@ class Orchestrator:
 
         return child
 
-    async def run(self, task: str) -> str:
+    async def run(self, task: str, capability: str = "") -> str:
         """Run a task. Fractal + QA at every scale.
 
         1. Grunt work? -> Llama (no QA)
@@ -493,7 +494,11 @@ class Orchestrator:
         if len(subtasks) > 1 and self.depth < self.max_depth:
             return await self._run_fractal(subtasks)
 
-        return await self._run_single_with_qa(task)
+        # Single task - use the capability from decomposition or judge it
+        leaf_task, leaf_cap = subtasks[0]
+        if capability:
+            leaf_cap = capability
+        return await self._run_single_with_qa(leaf_task, leaf_cap)
 
     async def _do_grunt(self, task: str) -> str:
         """Grunt work -> Llama, no QA."""
@@ -508,15 +513,25 @@ class Orchestrator:
                 return response.content
         return await self._run_single_with_qa(task)
 
-    async def _run_single_with_qa(self, task: str) -> str:
-        """Single agent does the work, different model QAs it, retry if needed."""
-        primary = self.rules.get_best_agent_for(task) or "claude"
+    async def _run_single_with_qa(self, task: str, capability: str = "") -> str:
+        """Single agent does the work, different model QAs it, retry if needed.
+
+        The capability determines which provider handles this task.
+        Claude judged the nature of the task; we just map it to a provider.
+        """
+        # Resolve capability -> provider
+        if not capability:
+            capability = await self._judge_capability(task)
+        primary = self._resolve_provider(capability)
         if primary not in self._agents:
             primary = "claude"
-        self.memento.note("route", f"{primary}:leaf", priority=1)
+        self.memento.note("route", f"{primary}:leaf:{capability}", priority=1)
 
         if self.tracker:
-            self.tracker.event(self.depth, f"routed to {primary} (leaf task)")
+            self.tracker.event(
+                self.depth,
+                f"routed to {primary} (capability: {capability})",
+            )
 
         # Step 1: Generate checklist BEFORE work begins
         checklist: list[str] = []
@@ -544,7 +559,7 @@ class Orchestrator:
 
         # Step 3: QA loop - different model reviews, retry if failed
         if self.qa_enabled and checklist:
-            result = await self._qa_loop(task, result, checklist, primary)
+            result = await self._qa_loop(task, result, checklist, primary, capability)
 
         self.memento.note("done", result[:150], priority=2)
         return result
@@ -556,11 +571,12 @@ class Orchestrator:
         return response.content if response.success else f"Failed: {response.error}"
 
     async def _qa_loop(
-        self, task: str, work: str, checklist: list[str], worker_name: str
+        self, task: str, work: str, checklist: list[str],
+        worker_name: str, worker_capability: str = "",
     ) -> str:
         """QA loop: review, reject, retry until pass or max retries."""
         for attempt in range(self.max_qa_retries + 1):
-            qa = await self._qa_review(task, work, checklist, worker_name)
+            qa = await self._qa_review(task, work, checklist, worker_name, worker_capability)
 
             self.memento.note(
                 f"qa_d{self.depth}",
@@ -618,52 +634,124 @@ class Orchestrator:
             )
         return work
 
-    async def _decompose(self, task: str) -> list[str]:
-        """Claude breaks a task into independent subtasks, or returns it as-is."""
+    async def _judge_capability(self, task: str) -> str:
+        """Ask Claude what capability a task needs.
+
+        Claude judges the NATURE of the task, not which model to use.
+        Returns one of: REASONING, CODE, MULTIMODAL, FAST.
+        """
+        msg = AgentMessage(
+            source="orchestrator",
+            target="claude",
+            memento=self.memento.briefing(),
+            content=(
+                "What type of work does this task require? "
+                "Reply with EXACTLY ONE word from: REASONING, CODE, MULTIMODAL, FAST\n\n"
+                "- REASONING: analysis, planning, proofs, architecture, design, comparison, evaluation\n"
+                "- CODE: code generation, debugging, refactoring, tests, implementation, algorithms\n"
+                "- MULTIMODAL: images, audio, video, diagrams, visual content\n"
+                "- FAST: formatting, converting, sorting, listing, templates, boilerplate, renaming\n\n"
+                f"Task: {task}"
+            ),
+        )
+        response = await self._tracked_send(self._claude, msg, label="judge-cap")
+        if not response.success:
+            return "REASONING"
+
+        # Extract the capability word from the response
+        word = response.content.strip().upper()
+        # Handle responses like "CODE" or "The task requires CODE" etc
+        for cap in _VALID_CAPABILITIES:
+            if cap in word:
+                return cap
+        return "REASONING"
+
+    async def _decompose(self, task: str) -> list[tuple[str, str]]:
+        """Claude breaks a task into subtasks with capability tags.
+
+        Returns list of (subtask, capability) tuples.
+        If atomic, returns [(task, capability)].
+        """
         if self.tracker:
             self.tracker.event(self.depth, "decomposing task...")
 
+        caps = " | ".join(f"{c}" for c in _VALID_CAPABILITIES)
         msg = AgentMessage(
             source="orchestrator",
             target="claude",
             memento=self.memento.briefing(),
             content=(
                 "Break this task into 2-5 independent subtasks that can run in parallel. "
-                "Return ONLY a numbered list, one subtask per line. "
-                "If the task is simple enough for one agent, return ONLY the task itself "
-                "as a single line with no numbering.\n\n"
+                "For EACH subtask, tag it with the type of work it needs.\n\n"
+                f"Available types: {caps}\n"
+                "- REASONING: analysis, planning, proofs, architecture, design\n"
+                "- CODE: code generation, debugging, refactoring, tests, algorithms\n"
+                "- MULTIMODAL: images, audio, video, diagrams\n"
+                "- FAST: formatting, converting, sorting, templates, boilerplate\n\n"
+                "Format EACH line as: [TYPE] description of subtask\n"
+                "Example:\n"
+                "1. [CODE] Implement the REST API endpoints\n"
+                "2. [REASONING] Design the database schema\n"
+                "3. [FAST] Generate boilerplate config files\n\n"
+                "If the task is simple enough for one agent, return it as a SINGLE tagged line "
+                "with no numbering.\n\n"
                 f"Task: {task}"
             ),
         )
         response = await self._tracked_send(self._claude, msg, label="decompose")
         if not response.success:
-            return [task]
+            return [(task, "REASONING")]
 
-        lines = response.content.strip().split("\n")
-        subtasks = []
-        for line in lines:
+        subtasks = self._parse_tagged_subtasks(response.content)
+        if not subtasks:
+            return [(task, "REASONING")]
+
+        if self.tracker and len(subtasks) > 1:
+            self.tracker.decomposed(self.depth, [f"[{c}] {s}" for s, c in subtasks])
+        elif self.tracker:
+            self.tracker.event(self.depth, f"task is atomic [{subtasks[0][1]}], no decomposition")
+
+        return subtasks
+
+    def _parse_tagged_subtasks(self, content: str) -> list[tuple[str, str]]:
+        """Parse Claude's tagged decomposition output.
+
+        Handles formats like:
+            1. [CODE] Implement the API
+            [REASONING] Design the schema
+            - [FAST] Generate configs
+        """
+        subtasks: list[tuple[str, str]] = []
+        tag_pattern = re.compile(r"\[(" + "|".join(_VALID_CAPABILITIES) + r")\]\s*(.+)", re.IGNORECASE)
+
+        for line in content.strip().split("\n"):
             line = line.strip()
             if not line:
                 continue
+            # Strip numbering prefixes: "1. ", "1) ", "- ", "* "
             for prefix in [".", ")", "- ", "* "]:
                 idx = line.find(prefix)
                 if idx != -1 and idx < 4:
                     line = line[idx + len(prefix):].strip()
                     break
-            if line:
-                subtasks.append(line)
 
-        result = subtasks if subtasks else [task]
+            match = tag_pattern.match(line)
+            if match:
+                cap = match.group(1).upper()
+                task = match.group(2).strip()
+                if task:
+                    subtasks.append((task, cap))
+            elif line:
+                # No tag - default to REASONING
+                subtasks.append((line, "REASONING"))
 
-        if self.tracker and len(result) > 1:
-            self.tracker.decomposed(self.depth, result)
-        elif self.tracker:
-            self.tracker.event(self.depth, "task is atomic, no decomposition")
+        return subtasks
 
-        return result
+    async def _run_fractal(self, subtasks: list[tuple[str, str]]) -> str:
+        """Spawn sub-swarms, run in parallel, each gets QA'd, synthesize.
 
-    async def _run_fractal(self, subtasks: list[str]) -> str:
-        """Spawn sub-swarms, run in parallel, each gets QA'd, synthesize."""
+        Each subtask is a (task_text, capability) tuple from _decompose.
+        """
         self.memento.note(
             "fractal",
             f"d={self.depth}->d={self.depth + 1}, {len(subtasks)} branches",
@@ -676,12 +764,12 @@ class Orchestrator:
                 f"spawning {len(subtasks)} child orchestrators at d={self.depth + 1}",
             )
 
-        async def run_branch(subtask: str) -> str:
+        async def run_branch(subtask: str, capability: str) -> str:
             child = self.spawn(subtask=subtask, inherit_notes=True)
-            return await child.run(subtask)
+            return await child.run(subtask, capability=capability)
 
         results = await asyncio.gather(
-            *(run_branch(st) for st in subtasks),
+            *(run_branch(st, cap) for st, cap in subtasks),
             return_exceptions=True,
         )
 
