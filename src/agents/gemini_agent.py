@@ -6,10 +6,11 @@ Each call spawns: gemini -p "prompt"
 
 from __future__ import annotations
 
-import asyncio
 import shutil
 
+from src.agents._subprocess import run_cli
 from src.agents.base import AgentCapability, AgentMessage, AgentResponse, BaseAgent
+from src.config import DEFAULT_CONFIG, OrchestratorConfig
 
 
 class GeminiAgent(BaseAgent):
@@ -19,7 +20,12 @@ class GeminiAgent(BaseAgent):
     Handles both MULTIMODAL and FAST capabilities.
     """
 
-    def __init__(self, model_id: str = "gemini-2.0-flash", cli_path: str | None = None):
+    def __init__(
+        self,
+        model_id: str = "gemini-2.0-flash",
+        cli_path: str | None = None,
+        config: OrchestratorConfig = DEFAULT_CONFIG,
+    ):
         super().__init__(
             name="gemini",
             model_id=model_id,
@@ -32,6 +38,7 @@ class GeminiAgent(BaseAgent):
             ],
         )
         self._cli = cli_path or shutil.which("gemini") or "gemini"
+        self._config = config
 
     async def send(self, message: AgentMessage) -> AgentResponse:
         """Spawn gemini CLI, capture output."""
@@ -39,35 +46,12 @@ class GeminiAgent(BaseAgent):
         if message.memento:
             prompt = f"[Survival notes: {message.memento}]\n\n{prompt}"
 
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                self._cli, "-p", prompt,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
-
-            if proc.returncode != 0:
-                return AgentResponse(
-                    agent_name=self.name, content="",
-                    success=False, error=stderr.decode().strip(),
-                )
-
-            return AgentResponse(
-                agent_name=self.name,
-                content=stdout.decode().strip(),
-                metadata={"cli": self._cli, "model": self.model_id},
-            )
-        except asyncio.TimeoutError:
-            return AgentResponse(
-                agent_name=self.name, content="",
-                success=False, error="CLI timed out after 300s",
-            )
-        except Exception as e:
-            return AgentResponse(
-                agent_name=self.name, content="",
-                success=False, error=str(e),
-            )
+        return await run_cli(
+            self.name,
+            [self._cli, "-p", prompt],
+            config=self._config,
+            metadata={"cli": self._cli, "model": self.model_id},
+        )
 
     async def health_check(self) -> bool:
         return shutil.which(self._cli) is not None

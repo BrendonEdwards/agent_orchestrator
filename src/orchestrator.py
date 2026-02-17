@@ -29,6 +29,7 @@ from src.agents.base import AgentMessage, AgentResponse, BaseAgent
 from src.agents.claude_agent import ClaudeAgent
 from src.agents.codex_agent import CodexAgent
 from src.agents.gemini_agent import GeminiAgent
+from src.config import DEFAULT_CONFIG, OrchestratorConfig
 from src.memento.memento import Memento
 from src.routing.router import MessageRouter
 from src.rules.loader import RulesLoader
@@ -67,11 +68,9 @@ _GRUNT_KEYWORDS = [
 # Valid capabilities Claude can assign
 _VALID_CAPABILITIES = frozenset(CAPABILITY_PROVIDERS.keys())
 
-# Max times work can be sent back before accepting
-_MAX_QA_RETRIES = 2
-
-# QA pass threshold (out of 10)
-_QA_PASS_SCORE = 7
+# Defaults sourced from config
+_MAX_QA_RETRIES = DEFAULT_CONFIG.max_qa_retries
+_QA_PASS_SCORE = DEFAULT_CONFIG.qa_pass_score
 
 
 class QAResult:
@@ -396,43 +395,73 @@ class Orchestrator:
 
         return self._parse_qa_response(response.content, checklist, reviewer.name)
 
+    # Regex patterns for resilient QA parsing.  Matches common deviations:
+    #   ITEM_1: PASS, Item 1: FAIL, 1: PASS, 1. PASS, **ITEM_1**: PASS
+    _ITEM_RE = re.compile(
+        r"\*{0,2}(?:ITEM[_ ]?)?(\d+)[.):\*]*\s*[:\-]\s*(PASS|FAIL)",
+        re.IGNORECASE,
+    )
+    # SCORE: 8/10, Score: 8, **Score**: 8/10, Overall: 8/10
+    _SCORE_RE = re.compile(
+        r"\*{0,2}(?:SCORE|OVERALL)\*{0,2}\s*[:\-]\s*(\d+)\s*(?:/\s*10)?",
+        re.IGNORECASE,
+    )
+    # FEEDBACK: ..., **Feedback**: ...
+    _FEEDBACK_RE = re.compile(
+        r"\*{0,2}FEEDBACK\*{0,2}\s*[:\-]\s*(.*)",
+        re.IGNORECASE,
+    )
+
     def _parse_qa_response(
         self, content: str, checklist: list[str], reviewer_name: str
     ) -> QAResult:
-        """Parse the structured QA review response."""
+        """Parse the structured QA review response.
+
+        Uses regex patterns that tolerate common formatting deviations
+        from the exact ITEM_1: PASS/FAIL template (markdown bold, varied
+        numbering, missing underscores, etc.).
+        """
         checklist_scores: dict[str, bool] = {}
         score = 10
         feedback = ""
+        feedback_lines: list[str] = []
+        in_feedback = False
 
         for line in content.strip().split("\n"):
-            line = line.strip()
-            upper = line.upper()
+            stripped = line.strip()
 
-            # Parse ITEM_N: PASS/FAIL
-            if upper.startswith("ITEM_"):
-                parts = line.split(":", 1)
-                if len(parts) == 2:
-                    item_key = parts[0].strip()
-                    passed = "PASS" in parts[1].upper()
-                    # Map back to checklist item
-                    try:
-                        idx = int(item_key.replace("ITEM_", "")) - 1
-                        if 0 <= idx < len(checklist):
-                            checklist_scores[checklist[idx]] = passed
-                    except ValueError:
-                        pass
+            # Parse ITEM_N: PASS/FAIL (multiple variants)
+            item_match = self._ITEM_RE.search(stripped)
+            if item_match:
+                idx = int(item_match.group(1)) - 1
+                passed = item_match.group(2).upper() == "PASS"
+                if 0 <= idx < len(checklist):
+                    checklist_scores[checklist[idx]] = passed
+                in_feedback = False
+                continue
 
             # Parse SCORE: N/10
-            elif upper.startswith("SCORE:"):
+            score_match = self._SCORE_RE.search(stripped)
+            if score_match:
                 try:
-                    score_part = line.split(":")[1].strip()
-                    score = int(score_part.split("/")[0].strip())
-                except (ValueError, IndexError):
+                    score = max(1, min(10, int(score_match.group(1))))
+                except ValueError:
                     pass
+                in_feedback = False
+                continue
 
-            # Parse FEEDBACK:
-            elif upper.startswith("FEEDBACK:"):
-                feedback = line.split(":", 1)[1].strip()
+            # Parse FEEDBACK: ... (may span multiple lines)
+            fb_match = self._FEEDBACK_RE.search(stripped)
+            if fb_match:
+                feedback_lines = [fb_match.group(1).strip()]
+                in_feedback = True
+                continue
+
+            # Continuation lines after FEEDBACK:
+            if in_feedback and stripped:
+                feedback_lines.append(stripped)
+
+        feedback = " ".join(feedback_lines).strip()
 
         passed = score >= self.qa_pass_score
         return QAResult(

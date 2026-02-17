@@ -19,11 +19,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-
-# Maximum notes before forced compaction
-_MAX_NOTES = 20
-# Maximum characters per note
-_MAX_NOTE_LENGTH = 200
+from src.config import DEFAULT_CONFIG
 
 
 class Note(BaseModel):
@@ -57,7 +53,7 @@ class Memento:
         # -> "goal=build REST API for users | constraint=must use PostgreSQL | ..."
     """
 
-    def __init__(self, persist_path: str | None = None, max_notes: int = _MAX_NOTES):
+    def __init__(self, persist_path: str | None = None, max_notes: int = DEFAULT_CONFIG.max_memento_notes):
         self._notes: dict[str, Note] = {}
         self._max_notes = max_notes
         self._persist_path = Path(persist_path) if persist_path else None
@@ -68,8 +64,9 @@ class Memento:
         Keep values SHORT. This is the whole point - if you can't say it
         in ~200 chars, you're remembering too much detail.
         """
-        if len(value) > _MAX_NOTE_LENGTH:
-            value = value[:_MAX_NOTE_LENGTH - 3] + "..."
+        max_len = DEFAULT_CONFIG.max_note_length
+        if len(value) > max_len:
+            value = value[:max_len - 3] + "..."
 
         self._notes[key] = Note(key=key, value=value, priority=priority)
 
