@@ -1,7 +1,7 @@
-"""Claude agent - the brain. Runs via Claude Code CLI.
+"""Claude agent: reasoning, planning and synthesis via Claude Code CLI.
 
-Uses your existing Claude Pro subscription. No API keys needed.
-Each call spawns: claude -p "prompt" --output-format text
+This wrapper is intentionally CLI-first. It uses the user's authenticated
+Claude Code session rather than API keys.
 """
 
 from __future__ import annotations
@@ -16,13 +16,13 @@ from src.config import DEFAULT_CONFIG, OrchestratorConfig
 class ClaudeAgent(BaseAgent):
     """Claude via the Claude Code CLI.
 
-    Spawns `claude -p "prompt"` as a subprocess. Uses your Pro
-    subscription - no API key, no per-token billing.
+    The model label is metadata only. Actual model selection is controlled by
+    the installed Claude Code CLI and the user's account settings.
     """
 
     def __init__(
         self,
-        model_id: str = "claude-sonnet-4-20250514",
+        model_id: str = "claude-sonnet-4.6",
         cli_path: str | None = None,
         config: OrchestratorConfig = DEFAULT_CONFIG,
     ):
