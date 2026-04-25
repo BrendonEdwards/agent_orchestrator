@@ -17,12 +17,14 @@ class ClaudeAgent(BaseAgent):
     """Claude via the Claude Code CLI.
 
     The model label is metadata only. Actual model selection is controlled by
-    the installed Claude Code CLI and the user's account settings.
+    the installed Claude Code CLI and the user's account settings. Claude Code
+    aliases such as `sonnet`, `opus`, and `opusplan` are preferred because
+    Anthropic can move them to the latest supported snapshots.
     """
 
     def __init__(
         self,
-        model_id: str = "claude-sonnet-4.6",
+        model_id: str = "sonnet",
         cli_path: str | None = None,
         config: OrchestratorConfig = DEFAULT_CONFIG,
     ):
