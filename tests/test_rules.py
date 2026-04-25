@@ -1,8 +1,5 @@
 """Tests for the rules loader."""
 
-import tempfile
-from pathlib import Path
-
 from src.rules.loader import RulesLoader
 
 
@@ -12,13 +9,12 @@ def test_defaults_when_no_file():
     assert "claude" in models
     assert "codex" in models
     assert "gemini" in models
-    assert "llama" in models
+    assert "llama" not in models
 
 
 def test_get_best_agent_defaults():
     loader = RulesLoader()
     loader.load()
-    # "reasoning" should favour claude
     result = loader.get_best_agent_for("complex reasoning task")
     assert result == "claude"
 
