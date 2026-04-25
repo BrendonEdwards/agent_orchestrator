@@ -1,20 +1,15 @@
-"""Rules loader - parses rules.md for model strengths and weaknesses.
-
-The whiteboard shows "Rules.md: Model strengths + weaknesses" as a key
-component that informs the orchestrator's routing decisions.
-"""
+"""Rules loader for model strengths and routing preferences."""
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any
 
 from pydantic import BaseModel, Field
 
 
 class ModelRules(BaseModel):
-    """Rules and capabilities for a specific model/agent."""
+    """Rules and capabilities for a specific model or agent."""
 
     name: str
     strengths: list[str] = Field(default_factory=list)
@@ -28,8 +23,9 @@ class ModelRules(BaseModel):
 class RulesLoader:
     """Loads and parses model rules from a markdown file.
 
-    The rules file defines each model's strengths, weaknesses, and routing
-    preferences so the orchestrator can make informed delegation decisions.
+    The rules file documents model strengths, weaknesses and routing
+    preferences. The main runtime capability mapping currently lives in
+    `src.orchestrator.CAPABILITY_PROVIDERS`.
     """
 
     def __init__(self, rules_path: str | None = None):
@@ -54,7 +50,6 @@ class RulesLoader:
         for line in content.split("\n"):
             line = line.strip()
 
-            # Match model headers (## Claude, ## Codex, etc.)
             model_match = re.match(r"^##\s+(.+)$", line)
             if model_match:
                 current_model = model_match.group(1).strip().lower()
@@ -65,13 +60,11 @@ class RulesLoader:
             if not current_model:
                 continue
 
-            # Match section headers (### Strengths, ### Weaknesses, etc.)
             section_match = re.match(r"^###\s+(.+)$", line)
             if section_match:
                 current_section = section_match.group(1).strip().lower()
                 continue
 
-            # Match list items
             item_match = re.match(r"^[-*]\s+(.+)$", line)
             if item_match and current_section and current_model in models:
                 item = item_match.group(1).strip()
@@ -85,7 +78,6 @@ class RulesLoader:
                 elif "avoid" in current_section:
                     model.avoid_tasks.append(item)
 
-            # Match context limit
             ctx_match = re.match(r"^[-*]\s+context.limit:\s*(\d+)", line, re.IGNORECASE)
             if ctx_match and current_model in models:
                 models[current_model].context_limit = int(ctx_match.group(1))
@@ -94,7 +86,7 @@ class RulesLoader:
         return models
 
     def _get_defaults(self) -> dict[str, ModelRules]:
-        """Return default rules when no rules file is available."""
+        """Return default three-agent rules when no rules file is available."""
         self._models = {
             "claude": ModelRules(
                 name="claude",
@@ -104,27 +96,21 @@ class RulesLoader:
             ),
             "codex": ModelRules(
                 name="codex",
-                strengths=["code generation", "code translation", "context compression"],
+                strengths=["code generation", "code translation", "debugging", "refactoring"],
                 weaknesses=["multimodal tasks", "creative writing"],
                 preferred_tasks=["code writing", "language translation", "technical tasks"],
             ),
             "gemini": ModelRules(
                 name="gemini",
-                strengths=["multimodal understanding", "image analysis", "audio processing"],
-                weaknesses=["complex multi-step reasoning"],
-                preferred_tasks=["image tasks", "audio tasks", "translation"],
-            ),
-            "llama": ModelRules(
-                name="llama",
-                strengths=["fast inference", "privacy", "offline operation", "no API cost"],
-                weaknesses=["smaller context window", "less capable on complex tasks"],
-                preferred_tasks=["privacy-sensitive tasks", "high-volume tasks", "local processing"],
+                strengths=["multimodal understanding", "image analysis", "audio processing", "formatting"],
+                weaknesses=["specialist code generation"],
+                preferred_tasks=["image tasks", "audio tasks", "translation", "fast formatting"],
             ),
         }
         return self._models
 
     def get_best_agent_for(self, task_description: str) -> str | None:
-        """Suggest the best agent for a given task based on the rules."""
+        """Suggest the best agent for a task based on the parsed rules."""
         if not self._models:
             self.load()
 
@@ -148,7 +134,7 @@ class RulesLoader:
             scores[name] = score
 
         if not scores:
-            return "claude"  # Default to Claude as the hub
+            return "claude"
         return max(scores, key=scores.get)  # type: ignore[arg-type]
 
     def get_routing_context(self) -> str:
