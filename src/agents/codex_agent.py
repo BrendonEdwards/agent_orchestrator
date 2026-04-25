@@ -1,8 +1,7 @@
-"""Codex agent - code generation. Runs via OpenAI Codex CLI.
+"""Codex agent: code generation and implementation via OpenAI's Codex CLI.
 
-Uses your existing ChatGPT Plus/Pro subscription. No API keys needed.
-Install: npm install -g @openai/codex
-Each call spawns: codex -q "prompt"
+This wrapper is intentionally CLI-first. It uses the user's authenticated
+Codex CLI session rather than API keys.
 """
 
 from __future__ import annotations
@@ -17,13 +16,13 @@ from src.config import DEFAULT_CONFIG, OrchestratorConfig
 class CodexAgent(BaseAgent):
     """Codex via the OpenAI Codex CLI.
 
-    Spawns `codex` as a subprocess. Uses your existing subscription.
-    Install with: npm install -g @openai/codex
+    The model label is metadata only. Actual model selection is controlled by
+    the installed Codex CLI and the user's account settings.
     """
 
     def __init__(
         self,
-        model_id: str = "o3-mini",
+        model_id: str = "gpt-5.2-codex",
         cli_path: str | None = None,
         config: OrchestratorConfig = DEFAULT_CONFIG,
     ):
@@ -55,4 +54,16 @@ class CodexAgent(BaseAgent):
         )
 
     async def health_check(self) -> bool:
-        return shutil.which(self._cli) is not None
+        """Run a real prompt so auth and command syntax are checked."""
+        try:
+            resp = await run_cli(
+                self.name,
+                [self._cli, "-q", "respond with ok"],
+                config=OrchestratorConfig(
+                    agent_timeout=self._config.health_check_timeout,
+                    agent_retries=0,
+                ),
+            )
+            return resp.success and len(resp.content) > 0
+        except Exception:
+            return False
